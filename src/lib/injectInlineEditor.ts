@@ -3,7 +3,24 @@
  * Makes text elements contenteditable with visual feedback, and communicates
  * changes back to the parent React component via postMessage.
  */
-export function injectInlineEditor(html: string): string {
+interface InlineEditorLabels {
+  clickToEdit: string;
+  savedButton: string;
+  saveButton: string;
+  unsavedChanges: string;
+  savedStatus: string;
+}
+
+const DEFAULT_LABELS: InlineEditorLabels = {
+  clickToEdit: 'Click any text to edit',
+  savedButton: 'Saved',
+  saveButton: 'Save',
+  unsavedChanges: 'Unsaved changes',
+  savedStatus: 'Saved!',
+};
+
+export function injectInlineEditor(html: string, labels: InlineEditorLabels = DEFAULT_LABELS): string {
+  const localizedLabels = { ...DEFAULT_LABELS, ...labels };
   const editorStyles = `
 <style data-inline-editor>
   /* Make slides scrollable when content overflows */
@@ -93,13 +110,14 @@ export function injectInlineEditor(html: string): string {
 <script data-inline-editor>
 (function() {
   var hasChanges = false;
+  var labels = ${JSON.stringify(localizedLabels)};
 
   // Toolbar
   var toolbar = document.createElement('div');
   toolbar.className = 'inline-editor-toolbar';
   toolbar.innerHTML =
-    '<span class="status">Click any text to edit</span>' +
-    '<button class="save-btn" disabled onclick="saveChanges()">Saved</button>';
+    '<span class="status">' + labels.clickToEdit + '</span>' +
+    '<button class="save-btn" disabled onclick="saveChanges()">' + labels.savedButton + '</button>';
   document.body.appendChild(toolbar);
 
   var statusEl = toolbar.querySelector('.status');
@@ -121,10 +139,10 @@ export function injectInlineEditor(html: string): string {
   document.addEventListener('input', function(e) {
     if (e.target && e.target.getAttribute && e.target.getAttribute('contenteditable') === 'true') {
       hasChanges = true;
-      statusEl.textContent = 'Unsaved changes';
+      statusEl.textContent = labels.unsavedChanges;
       statusEl.className = 'status unsaved';
       saveBtn.disabled = false;
-      saveBtn.textContent = 'Save';
+      saveBtn.textContent = labels.saveButton;
     }
   });
 
@@ -161,14 +179,14 @@ export function injectInlineEditor(html: string): string {
     }, '*');
 
     hasChanges = false;
-    statusEl.textContent = 'Saved!';
+    statusEl.textContent = labels.savedStatus;
     statusEl.className = 'status';
     saveBtn.disabled = true;
-    saveBtn.textContent = 'Saved';
+    saveBtn.textContent = labels.savedButton;
 
     setTimeout(function() {
       if (!hasChanges) {
-        statusEl.textContent = 'Click any text to edit';
+        statusEl.textContent = labels.clickToEdit;
       }
     }, 1500);
   };

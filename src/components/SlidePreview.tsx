@@ -27,11 +27,94 @@ interface VersionItemProps {
   isAuto: boolean;
 }
 
+type SectionTransition = 'default' | 'none' | 'fade' | 'slide' | 'convex' | 'concave' | 'zoom';
+const DEFAULT_ARROW_COLOR = '#ffffff';
+
+const SECTION_TRANSITION_OPTIONS: { value: SectionTransition; label: string }[] = [
+  { value: 'default', label: 'Default' },
+  { value: 'slide', label: 'Slide' },
+  { value: 'fade', label: 'Fade' },
+  { value: 'zoom', label: 'Zoom' },
+  { value: 'convex', label: 'Convex' },
+  { value: 'concave', label: 'Concave' },
+  { value: 'none', label: 'None' },
+];
+
 /**
  * Check if content is a complete HTML document (from the new AI output format).
  */
 const isCompleteHtml = (content: string): boolean => {
   return /<!doctype\s+html/i.test(content.trim()) || /^<html[\s>]/i.test(content.trim());
+};
+
+const getSectionTransitionSelection = (content: string): SectionTransition => {
+  const matches = [...content.matchAll(/<section\b[^>]*\sdata-transition="([^"]+)"/gi)];
+  if (matches.length === 0) return 'default';
+
+  const values = Array.from(new Set(matches.map((match) => (match[1] || '').trim().toLowerCase())));
+  if (values.length !== 1) return 'default';
+
+  const onlyValue = values[0];
+  return SECTION_TRANSITION_OPTIONS.some((opt) => opt.value === onlyValue)
+    ? (onlyValue as SectionTransition)
+    : 'default';
+};
+
+const applySectionTransition = (content: string, transition: SectionTransition): string => {
+  const stripped = content.replace(/\sdata-transition="[^"]*"/gi, '');
+
+  if (transition === 'default') {
+    return stripped;
+  }
+
+  return stripped.replace(/<section\b/gi, `<section data-transition="${transition}"`);
+};
+
+const normalizeHexColor = (value: string, fallback: string = DEFAULT_ARROW_COLOR): string => {
+  const trimmed = value.trim();
+  if (/^#[0-9a-fA-F]{6}$/.test(trimmed)) return trimmed.toLowerCase();
+  if (/^[0-9a-fA-F]{6}$/.test(trimmed)) return `#${trimmed.toLowerCase()}`;
+  if (/^#[0-9a-fA-F]{3}$/.test(trimmed)) {
+    const r = trimmed[1];
+    const g = trimmed[2];
+    const b = trimmed[3];
+    return `#${r}${r}${g}${g}${b}${b}`.toLowerCase();
+  }
+  return fallback.toLowerCase();
+};
+
+const buildArrowColorStyle = (color: string): string => `
+<style data-nav-arrow-color>
+  .reveal .controls,
+  .reveal .controls button,
+  .reveal .controls .navigate-left,
+  .reveal .controls .navigate-right,
+  .reveal .controls .navigate-up,
+  .reveal .controls .navigate-down,
+  .reveal .controls .navigate-prev,
+  .reveal .controls .navigate-next {
+    color: ${color} !important;
+  }
+  .reveal .controls .enabled {
+    color: ${color} !important;
+  }
+</style>`.trim();
+
+const getArrowColorSelection = (content: string): string => {
+  const match = content.match(/<style data-nav-arrow-color>[\s\S]*?color:\s*(#[0-9a-fA-F]{3,6})\s*!important;[\s\S]*?<\/style>/i);
+  return normalizeHexColor(match?.[1] || DEFAULT_ARROW_COLOR);
+};
+
+const applyArrowColor = (content: string, color: string): string => {
+  const normalized = normalizeHexColor(color);
+  const cleaned = content.replace(/\s*<style data-nav-arrow-color>[\s\S]*?<\/style>/gi, '');
+  const styleTag = buildArrowColorStyle(normalized);
+
+  if (cleaned.includes('</head>')) {
+    return cleaned.replace('</head>', `  ${styleTag}\n</head>`);
+  }
+
+  return `${styleTag}\n${cleaned}`;
 };
 
 /**
@@ -270,12 +353,24 @@ export default function SlidePreview({
   projectId
 }: SlidePreviewProps) {
   const [viewMode, setViewMode] = useState<ViewMode>("editor");
+  const [sectionTransition, setSectionTransition] = useState<SectionTransition>('default');
+  const [arrowColor, setArrowColor] = useState<string>(DEFAULT_ARROW_COLOR);
+  const [arrowColorInput, setArrowColorInput] = useState<string>(DEFAULT_ARROW_COLOR);
+  const [isArrowColorOpen, setIsArrowColorOpen] = useState(false);
   const [editingVersionId, setEditingVersionId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState<string>("");
   const [deletingVersionId, setDeletingVersionId] = useState<string | null>(null);
-  const [presentationUrl, setPresentationUrl] = useState<string | null>(null);
+  const [presentationFrameSrc, setPresentationFrameSrc] = useState<string | null>(null);
   const [overflowSlides, setOverflowSlides] = useState<{index: number; title: string}[]>([]);
   const { t } = useLanguage();
+  const arrowColorPopoverRef = useRef<HTMLDivElement | null>(null);
+  const inlineEditorLabels = {
+    clickToEdit: t('slidePreview.clickToEdit'),
+    savedButton: t('slidePreview.savedButton'),
+    saveButton: t('slidePreview.saveButton'),
+    unsavedChanges: t('slidePreview.unsavedChanges'),
+    savedStatus: t('slidePreview.savedStatus'),
+  };
 
   const PLACEHOLDER_SLIDES = `<!doctype html>
 <html lang="en">
@@ -324,6 +419,10 @@ export default function SlidePreview({
 </html>`;
 
   const [localContent, setLocalContent] = useState<string>(slidesData || PLACEHOLDER_SLIDES);
+  const normalizedContent = applyArrowColor(
+    applySectionTransition(localContent, sectionTransition),
+    arrowColor
+  );
 
   // Sync slidesData → localContent
   useEffect(() => {
@@ -332,43 +431,33 @@ export default function SlidePreview({
       const codeBlockMatch = slidesData.match(/```html([\s\S]*?)```/i);
       const extracted = codeBlockMatch ? codeBlockMatch[1].trim() : slidesData;
       setLocalContent(extracted);
+      setSectionTransition(getSectionTransitionSelection(extracted));
+      const nextArrowColor = getArrowColorSelection(extracted);
+      setArrowColor(nextArrowColor);
+      setArrowColorInput(nextArrowColor);
     } else {
       setLocalContent(PLACEHOLDER_SLIDES);
+      setSectionTransition(getSectionTransitionSelection(PLACEHOLDER_SLIDES));
+      const nextArrowColor = getArrowColorSelection(PLACEHOLDER_SLIDES);
+      setArrowColor(nextArrowColor);
+      setArrowColorInput(nextArrowColor);
     }
     setOverflowSlides([]);
   }, [slidesData, t]);
 
-
   useEffect(() => {
-    if (!presentationUrl) return;
+    if (!isArrowColorOpen) return;
 
-    const originalOverflow = document.body.style.overflow;
-
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setPresentationUrl((currentUrl) => {
-          if (currentUrl) URL.revokeObjectURL(currentUrl);
-          return null;
-        });
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!arrowColorPopoverRef.current) return;
+      if (!arrowColorPopoverRef.current.contains(event.target as Node)) {
+        setIsArrowColorOpen(false);
       }
     };
 
-    document.body.style.overflow = 'hidden';
-    window.addEventListener('keydown', handleKeyDown);
-
-    return () => {
-      document.body.style.overflow = originalOverflow;
-      window.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [presentationUrl]);
-
-  useEffect(() => {
-    return () => {
-      if (presentationUrl) {
-        URL.revokeObjectURL(presentationUrl);
-      }
-    };
-  }, [presentationUrl]);
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => document.removeEventListener('mousedown', handlePointerDown);
+  }, [isArrowColorOpen]);
 
   // Listen for inline editor saves from the iframe
   useEffect(() => {
@@ -391,23 +480,48 @@ export default function SlidePreview({
   };
 
   const handleSave = () => {
-    onSave(localContent);
+    onSave(normalizedContent);
   };
 
-  const handlePresent = () => {
-    const content = localContent;
-    // Make image URLs absolute so they resolve from blob: context
-    const html = makeImageUrlsAbsolute(buildPresentationHtml(content));
-    const url = URL.createObjectURL(new Blob([html], { type: 'text/html;charset=utf-8' }));
-
-    setPresentationUrl((currentUrl) => {
-      if (currentUrl) URL.revokeObjectURL(currentUrl);
-      return url;
+  const handleSectionTransitionChange = (nextTransition: SectionTransition) => {
+    setSectionTransition(nextTransition);
+    setLocalContent((prev) => {
+      const updated = applySectionTransition(prev, nextTransition);
+      if (onEditorChange && updated !== prev) {
+        onEditorChange(updated);
+      }
+      return updated;
     });
   };
 
+  const handleArrowColorChange = (nextColor: string) => {
+    const normalized = normalizeHexColor(nextColor, arrowColor);
+    setArrowColor(normalized);
+    setArrowColorInput(normalized);
+    setLocalContent((prev) => {
+      const updated = applyArrowColor(prev, normalized);
+      if (onEditorChange && updated !== prev) {
+        onEditorChange(updated);
+      }
+      return updated;
+    });
+  };
+
+  const handlePresent = () => {
+    const content = normalizedContent;
+    // Make image URLs absolute so they resolve from blob: context
+    const html = makeImageUrlsAbsolute(buildPresentationHtml(content));
+    try {
+      sessionStorage.setItem('openslides_present_html', html);
+    } catch {
+      window.alert('Unable to prepare presentation HTML for the presentation overlay.');
+      return;
+    }
+    setPresentationFrameSrc(`/present?ts=${Date.now()}`);
+  };
+
   const handleDownload = async () => {
-    const content = localContent;
+    const content = normalizedContent;
     // Make URLs absolute first, then inline images as base64 for standalone file
     let html = makeImageUrlsAbsolute(buildPresentationHtml(content));
     html = await inlineImages(html);
@@ -599,7 +713,7 @@ export default function SlidePreview({
             title="Present in overlay"
           >
             <Play size={14} />
-            <span>Present</span>
+            <span>{t('slidePreview.present')}</span>
           </button>
           <button
             onClick={handleDownload}
@@ -610,6 +724,68 @@ export default function SlidePreview({
           </button>
         </div>
       </div>
+
+      {viewMode === "editor" && (
+        <div className="flex items-center gap-4 px-4 py-2 border-b border-border bg-panel/80 relative">
+          <label className="flex items-center gap-2 text-sm text-gray-300">
+            <span className="text-gray-400">{t('slidePreview.transition')}</span>
+            <select
+              value={sectionTransition}
+              onChange={(e) => handleSectionTransitionChange(e.target.value as SectionTransition)}
+              className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors"
+            >
+              {SECTION_TRANSITION_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <div ref={arrowColorPopoverRef} className="relative flex items-center gap-2 text-sm text-gray-300">
+            <span className="text-gray-400">{t('slidePreview.arrowColor')}</span>
+            <button
+              type="button"
+              onClick={() => setIsArrowColorOpen((open) => !open)}
+              className="flex items-center gap-2 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors"
+            >
+              <span
+                className="h-4 w-4 rounded border border-white/20"
+                style={{ backgroundColor: arrowColor }}
+              />
+              <span className="font-mono uppercase">{arrowColor}</span>
+            </button>
+
+            {isArrowColorOpen && (
+              <div className="absolute left-0 top-full mt-2 w-56 rounded-xl border border-gray-700 bg-gray-900 p-3 shadow-2xl z-20">
+                <div className="flex flex-col gap-3">
+                  <input
+                    type="color"
+                    value={arrowColor}
+                    onChange={(e) => handleArrowColorChange(e.target.value)}
+                    className="h-12 w-full cursor-pointer rounded-lg border border-gray-700 bg-transparent"
+                  />
+                  <input
+                    type="text"
+                    value={arrowColorInput}
+                    onChange={(e) => setArrowColorInput(e.target.value)}
+                    onBlur={(e) => handleArrowColorChange(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        handleArrowColorChange(arrowColorInput);
+                        setIsArrowColorOpen(false);
+                      }
+                    }}
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white font-mono uppercase focus:outline-none focus:border-blue-500"
+                    placeholder="#ffffff"
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+
+        </div>
+      )}
 
       {/* Main Content */}
       <div className="flex-1 relative min-h-0">
@@ -660,8 +836,9 @@ export default function SlidePreview({
             )}
             <div className="flex-1 flex items-center justify-center p-4 overflow-hidden">
               <iframe
+                key={sectionTransition}
                 title="Slide Editor"
-                srcDoc={injectInlineEditor(localContent)}
+                srcDoc={injectInlineEditor(normalizedContent, inlineEditorLabels)}
                 style={{
                   border: 0,
                   borderRadius: '8px',
@@ -717,21 +894,17 @@ export default function SlidePreview({
         )}
       </div>
 
-      {presentationUrl && (
+      {presentationFrameSrc && (
         <div className="fixed inset-0 z-[100] bg-black/90 backdrop-blur-sm">
           <iframe
+            key={presentationFrameSrc}
             title="Presentation"
-            src={presentationUrl}
+            src={presentationFrameSrc}
             className="w-full h-full border-0 bg-transparent"
             allowFullScreen
           />
           <button
-            onClick={() => {
-              setPresentationUrl((currentUrl) => {
-                if (currentUrl) URL.revokeObjectURL(currentUrl);
-                return null;
-              });
-            }}
+            onClick={() => setPresentationFrameSrc(null)}
             className="absolute top-5 right-5 z-[101] flex h-11 w-11 items-center justify-center rounded-full bg-black/20 text-white/45 transition-all hover:bg-black/45 hover:text-white focus:outline-none focus:ring-2 focus:ring-white/60"
             title="Close presentation"
             aria-label="Close presentation"
@@ -740,6 +913,7 @@ export default function SlidePreview({
           </button>
         </div>
       )}
+
     </div>
   );
 }

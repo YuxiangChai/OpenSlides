@@ -6,13 +6,21 @@ import SettingsModal from "./components/SettingsModal";
 import { Project, CurrentView } from '@/types';
 
 export default function App() {
+  const isPresentRoute = window.location.pathname === "/present";
+  const [presentHtml, setPresentHtml] = useState<string | null>(null);
   const [currentView, setCurrentView] = useState<CurrentView>("dashboard");
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
 
+  useEffect(() => {
+    if (!isPresentRoute) return;
+    const html = sessionStorage.getItem('openslides_present_html');
+    setPresentHtml(html);
+  }, [isPresentRoute]);
 
   // Restore project from URL on mount
   useEffect(() => {
+    if (isPresentRoute) return;
     const params = new URLSearchParams(window.location.search);
     const projectId = params.get("project");
 
@@ -25,6 +33,17 @@ export default function App() {
       }
     }
   }, []);
+
+  useEffect(() => {
+    if (!isPresentRoute || !presentHtml) return;
+    document.open();
+    document.write(presentHtml);
+    document.close();
+  }, [isPresentRoute, presentHtml]);
+
+  if (isPresentRoute) {
+    return null;
+  }
 
   return (
     <div className="h-screen bg-background text-text-primary font-sans overflow-hidden flex flex-col">
