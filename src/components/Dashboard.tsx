@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Plus, Folder, Calendar, ArrowRight, Layout, Trash2, CheckCircle, Circle } from "lucide-react";
+import { Plus, Upload, Folder, Calendar, ArrowRight, Layout, Trash2, CheckCircle, Circle } from "lucide-react";
 
 import { useLanguage } from "../hooks/useLanguage";
 import { Project } from "@/types";
@@ -14,6 +14,7 @@ export default function Dashboard({ onSelectProject }: DashboardProps) {
   const [loading, setLoading] = useState(true);
   const [selectedProjects, setSelectedProjects] = useState<Set<string>>(new Set());
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
   const { t } = useLanguage();
 
   const fetchProjects = async () => {
@@ -57,6 +58,74 @@ export default function Dashboard({ onSelectProject }: DashboardProps) {
       fetchProjects();
     } catch (error) {
       console.error('Failed to create project:', error);
+    }
+  };
+
+  const handleImportHtml = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    // Reset input so the same file can be re-selected
+    e.target.value = '';
+
+    const html = await file.text();
+    // Derive project name from filename (strip .html extension)
+    let name = file.name.replace(/\.html?$/i, '').trim();
+    if (!name) name = 'Imported Slides';
+
+    // Check for duplicate name and auto-suffix
+    let finalName = name;
+    let suffix = 1;
+    while (projects.some(p => p.name === finalName)) {
+      suffix++;
+      finalName = `${name} (${suffix})`;
+    }
+
+    try {
+      // 1. Create the project
+      const res = await fetch('/api/projects', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: finalName, name: finalName }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        alert(data.error || 'Failed to create project');
+        return;
+      }
+
+      // 2. Save the HTML as the initial state
+      await fetch(`/api/projects/${encodeURIComponent(finalName)}/states`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          stateId: 'state_1',
+          html,
+          chat: [],
+          context: null,
+        }),
+      });
+
+      // 3. Save slide info pointing to this state
+      await fetch(`/api/projects/${encodeURIComponent(finalName)}/info`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          states: [{
+            id: 'state_1',
+            name: 'Imported',
+            path: 'state_1',
+            chat_path: 'state_1',
+            save_time: new Date().toISOString(),
+            is_auto: false,
+          }],
+          auto_states: [],
+          current_state: 'state_1',
+        }),
+      });
+
+      fetchProjects();
+    } catch (error) {
+      console.error('Failed to import project:', error);
     }
   };
 
@@ -116,27 +185,44 @@ export default function Dashboard({ onSelectProject }: DashboardProps) {
             <h1 className="text-3xl font-bold text-white mb-2">
               {t('dashboard.heroTitle')}
             </h1>
-            <p className="text-gray-400 text-sm leading-relaxed">
+            <p className="text-gray-400 text-sm leading-relaxed whitespace-pre-line">
               {t('dashboard.heroDescription')}
             </p>
           </div>
 
-          <form
-            onSubmit={createProject}
-            className="flex items-center gap-3 w-full md:w-auto"
-          >
+          <div className="flex items-center gap-3">
+            <form
+              onSubmit={createProject}
+              className="flex items-center gap-3"
+            >
+              <input
+                type="text"
+                placeholder={t('dashboard.projectNamePlaceholder')}
+                className="w-48 h-12 bg-gray-950/50 border border-gray-700 px-4 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none text-white placeholder-gray-500 backdrop-blur-sm"
+                value={newProjectName}
+                onChange={(e) => setNewProjectName(e.target.value)}
+              />
+              <button className="h-12 w-36 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-semibold shadow-lg hover:shadow-blue-500/20 transition-all flex items-center justify-center gap-2 whitespace-nowrap">
+                <Plus size={18} />
+                {t('dashboard.createProject')}
+              </button>
+            </form>
             <input
-              type="text"
-              placeholder={t('dashboard.projectNamePlaceholder')}
-              className="flex-1 md:w-56 h-12 bg-gray-950/50 border border-gray-700 px-4 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none text-white placeholder-gray-500 backdrop-blur-sm"
-              value={newProjectName}
-              onChange={(e) => setNewProjectName(e.target.value)}
+              ref={fileInputRef}
+              type="file"
+              accept=".html,.htm"
+              className="hidden"
+              onChange={handleImportHtml}
             />
-            <button className="h-12 w-44 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-semibold shadow-lg hover:shadow-blue-500/20 transition-all flex items-center justify-center gap-2 whitespace-nowrap">
-              <Plus size={18} />
-              {t('dashboard.createProject')}
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              className="h-12 w-36 bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white rounded-xl font-medium border border-gray-700 hover:border-gray-600 transition-all flex items-center justify-center gap-2 whitespace-nowrap"
+            >
+              <Upload size={16} />
+              {t('dashboard.importHtml')}
             </button>
-          </form>
+          </div>
         </div>
       </section>
 
