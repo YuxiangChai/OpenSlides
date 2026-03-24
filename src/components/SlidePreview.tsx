@@ -704,6 +704,7 @@ export default function SlidePreview({
   projectId
 }: SlidePreviewProps) {
   const [viewMode, setViewMode] = useState<ViewMode>("editor");
+  const [codeScrollTop, setCodeScrollTop] = useState(0);
   const [sectionTransition, setSectionTransition] = useState<SectionTransition>('default');
   const [arrowColor, setArrowColor] = useState<string>(DEFAULT_ARROW_COLOR);
   const [arrowColorInput, setArrowColorInput] = useState<string>(DEFAULT_ARROW_COLOR);
@@ -1306,7 +1307,7 @@ export default function SlidePreview({
             </div>
           </div>
         ) : viewMode === "code" ? (
-          <CodeEditor code={localContent} onChange={setLocalContent} />
+          <CodeEditor code={localContent} onChange={setLocalContent} initialScrollTop={codeScrollTop} onScrollChange={setCodeScrollTop} />
         ) : (
           <div className="w-full h-full bg-background overflow-y-auto custom-scrollbar p-6">
             <h3 className="text-xl font-bold text-white mb-6 flex items-center gap-2">
