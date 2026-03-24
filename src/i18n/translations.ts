@@ -117,6 +117,11 @@ export const translations = {
       descClaude: "Native Anthropic API with cache_control",
       descGemini: "Native Google API with context caching",
       descOpenai: "OpenAI-compatible format (GPT, proxies, etc.)",
+      pricing: "Pricing (per 1M tokens)",
+      pricingHint: "Leave empty to use defaults. Prices auto-detected from model name.",
+      priceInput: "Input $",
+      priceCached: "Cached $",
+      priceOutput: "Output $",
     },
     help: {
       howToUse: "How to use",
@@ -261,6 +266,11 @@ export const translations = {
       descClaude: "原生 Anthropic API，支持 cache_control",
       descGemini: "原生 Google API，支持上下文缓存",
       descOpenai: "OpenAI 兼容格式（GPT、代理等）",
+      pricing: "定价（每百万 token）",
+      pricingHint: "留空使用默认值。价格根据模型名称自动检测。",
+      priceInput: "输入 $",
+      priceCached: "缓存 $",
+      priceOutput: "输出 $",
     },
     help: {
       howToUse: "使用指南",

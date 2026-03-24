@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from "react";
-import { X, Check, AlertCircle, Key, Cpu, Eye, EyeOff, Globe } from "lucide-react";
+import { X, Check, AlertCircle, Key, Cpu, Eye, EyeOff, Globe, DollarSign } from "lucide-react";
 import { useLanguage } from "../hooks/useLanguage";
 import { AIProvider } from "@/types";
+import { lookupPricing } from "@/lib/ai";
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -20,12 +21,18 @@ export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const [modelName, setModelName] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [showApiKey, setShowApiKey] = useState(false);
+  const [priceInput, setPriceInput] = useState("");
+  const [priceCached, setPriceCached] = useState("");
+  const [priceOutput, setPriceOutput] = useState("");
   const [saveStatus, setSaveStatus] = useState<'success' | 'error' | null>(null);
   const { t } = useLanguage();
 
   useEffect(() => {
     if (isOpen) {
       setSaveStatus(null);
+      setPriceInput("");
+      setPriceCached("");
+      setPriceOutput("");
       fetch('/api/settings')
         .then(res => res.json())
         .then(data => {
@@ -40,12 +47,43 @@ export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
           setModelName('');
           setBaseUrl('');
         });
+      // Load custom pricing for current model
+      fetch('/api/pricing')
+        .then(res => res.json())
+        .then(data => {
+          // Will be updated when model name changes via the other effect
+          setPricingData(data);
+        })
+        .catch(() => {});
     }
   }, [isOpen]);
 
-  if (!isOpen) return null;
+  const [pricingData, setPricingData] = useState<{ models: Record<string, any>; custom: Record<string, any> } | null>(null);
 
   const selectedProvider = PROVIDER_OPTIONS.find(p => p.value === provider)!;
+
+  // Resolve the effective model name for pricing lookup
+  const effectiveModel = modelName.trim() || selectedProvider.defaultModel;
+  const defaultPricing = pricingData
+    ? (pricingData.models?.[effectiveModel] ||
+       Object.entries(pricingData.models || {}).find(([k]) => effectiveModel.includes(k))?.[1])
+    : lookupPricing(effectiveModel);
+  const customPricing = pricingData?.custom?.[effectiveModel];
+
+  // Load custom pricing values when model changes
+  useEffect(() => {
+    if (customPricing) {
+      setPriceInput(String(customPricing.input));
+      setPriceCached(String(customPricing.cached));
+      setPriceOutput(String(customPricing.output));
+    } else {
+      setPriceInput("");
+      setPriceCached("");
+      setPriceOutput("");
+    }
+  }, [effectiveModel, pricingData]);
+
+  if (!isOpen) return null;
 
   const handleProviderChange = (newProvider: AIProvider) => {
     setProvider(newProvider);
@@ -67,6 +105,22 @@ export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
         body: JSON.stringify(settings),
       });
       if (!res.ok) throw new Error('Failed to save');
+
+      // Save custom pricing if any field is filled
+      if (priceInput || priceCached || priceOutput) {
+        const base = defaultPricing || { input: 2.0, cached: 0.5, output: 8.0 };
+        await fetch('/api/pricing/custom', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: effectiveModel,
+            input: priceInput ? Number(priceInput) : base.input,
+            cached: priceCached ? Number(priceCached) : base.cached,
+            output: priceOutput ? Number(priceOutput) : base.output,
+          }),
+        });
+      }
+
       setSaveStatus('success');
       setTimeout(() => setSaveStatus(null), 3000);
     } catch {
@@ -176,6 +230,52 @@ export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
               <p className="text-xs text-gray-500">
                 {t('settings.modelNameHint')} {selectedProvider.defaultModel}
               </p>
+            </div>
+          </section>
+
+          {/* Pricing */}
+          <section className="space-y-4">
+            <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider flex items-center gap-2">
+              <DollarSign size={14} /> {t('settings.pricing')}
+            </h3>
+            <p className="text-xs text-gray-500">{t('settings.pricingHint')}</p>
+            <div className="grid grid-cols-3 gap-3">
+              <div className="space-y-1">
+                <label className="block text-xs text-gray-400">{t('settings.priceInput')}</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={priceInput}
+                  onChange={(e) => setPriceInput(e.target.value)}
+                  className="w-full bg-black/30 border border-[#2e2e30] rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500 transition-colors"
+                  placeholder={defaultPricing ? String(defaultPricing.input) : "2.00"}
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="block text-xs text-gray-400">{t('settings.priceCached')}</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={priceCached}
+                  onChange={(e) => setPriceCached(e.target.value)}
+                  className="w-full bg-black/30 border border-[#2e2e30] rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500 transition-colors"
+                  placeholder={defaultPricing ? String(defaultPricing.cached) : "0.50"}
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="block text-xs text-gray-400">{t('settings.priceOutput')}</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={priceOutput}
+                  onChange={(e) => setPriceOutput(e.target.value)}
+                  className="w-full bg-black/30 border border-[#2e2e30] rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500 transition-colors"
+                  placeholder={defaultPricing ? String(defaultPricing.output) : "8.00"}
+                />
+              </div>
             </div>
           </section>
 

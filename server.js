@@ -1045,6 +1045,7 @@ app.get('/api/projects/:id/file/:filename', (req, res) => {
 // ============================================================
 
 const SETTINGS_PATH = path.join(__dirname, 'settings.json');
+const PRICING_PATH = path.join(__dirname, 'pricing.json');
 
 app.get('/api/settings', (req, res) => {
   if (!fs.existsSync(SETTINGS_PATH)) return res.json({});
@@ -1053,6 +1054,24 @@ app.get('/api/settings', (req, res) => {
 
 app.put('/api/settings', (req, res) => {
   fs.writeFileSync(SETTINGS_PATH, JSON.stringify(req.body, null, 2));
+  res.json({ success: true });
+});
+
+// Pricing
+app.get('/api/pricing', (req, res) => {
+  if (!fs.existsSync(PRICING_PATH)) return res.json({ models: {}, custom: {} });
+  res.json(JSON.parse(fs.readFileSync(PRICING_PATH, 'utf-8')));
+});
+
+app.put('/api/pricing/custom', (req, res) => {
+  const { model, input, cached, output } = req.body;
+  if (!model) return res.status(400).json({ error: 'Model name is required' });
+  const pricing = fs.existsSync(PRICING_PATH)
+    ? JSON.parse(fs.readFileSync(PRICING_PATH, 'utf-8'))
+    : { models: {}, custom: {} };
+  if (!pricing.custom) pricing.custom = {};
+  pricing.custom[model] = { input: Number(input), cached: Number(cached), output: Number(output) };
+  fs.writeFileSync(PRICING_PATH, JSON.stringify(pricing, null, 2));
   res.json({ success: true });
 });
 

@@ -265,6 +265,8 @@ export async function loadConfig(): Promise<AIConfig> {
   } catch {
     _cachedConfig = { provider: 'gemini', apiKey: '', model: '', baseUrl: '' };
   }
+  // Also load pricing data
+  await loadPricing();
   return _cachedConfig;
 }
 
@@ -291,54 +293,61 @@ interface PricingTier {
   output: number;   // per 1M tokens
 }
 
-function getPricing(provider: AIProvider, model: string, inputTokens: number): PricingTier {
-  if (provider === 'gemini') {
-    const isLong = inputTokens > 200000;
-    if (model.includes('2.5-pro')) {
-      return isLong
-        ? { input: 5.0, cached: 0.625, output: 32.0 }
-        : { input: 2.5, cached: 0.3125, output: 15.0 };
-    }
-    // gemini-2.5-flash and others
-    return isLong
-      ? { input: 4.0, cached: 0.40, output: 18.0 }
-      : { input: 2.0, cached: 0.20, output: 12.0 };
-  }
-
-  if (provider === 'claude') {
-    if (model.includes('opus')) {
-      return { input: 15.0, cached: 1.5, output: 75.0 };
-    }
-    if (model.includes('haiku')) {
-      return { input: 0.80, cached: 0.08, output: 4.0 };
-    }
-    // sonnet
-    return { input: 3.0, cached: 0.30, output: 15.0 };
-  }
-
-  // OpenAI
-  if (model.includes('gpt-4o-mini')) {
-    return { input: 0.15, cached: 0.075, output: 0.60 };
-  }
-  if (model.includes('gpt-4o')) {
-    return { input: 2.50, cached: 1.25, output: 10.0 };
-  }
-  if (model.includes('o3') || model.includes('o1')) {
-    return { input: 10.0, cached: 2.50, output: 40.0 };
-  }
-  // Default
-  return { input: 2.0, cached: 0.50, output: 8.0 };
+interface PricingData {
+  models: Record<string, PricingTier>;
+  custom: Record<string, PricingTier>;
 }
 
+let _cachedPricing: PricingData | null = null;
+
+export async function loadPricing(): Promise<PricingData> {
+  try {
+    const res = await fetch('/api/pricing');
+    if (res.ok) {
+      _cachedPricing = await res.json();
+      return _cachedPricing!;
+    }
+  } catch {
+    // fall through
+  }
+  return { models: {}, custom: {} };
+}
+
+function getPricingCached(): PricingData {
+  return _cachedPricing || { models: {}, custom: {} };
+}
+
+export function lookupPricing(model: string): PricingTier | null {
+  const data = getPricingCached();
+  // Custom pricing takes priority
+  if (data.custom?.[model]) return data.custom[model];
+  // Exact match in defaults
+  if (data.models?.[model]) return data.models[model];
+  // Partial match: find the longest key that the model name contains
+  const allEntries = [
+    ...Object.entries(data.custom || {}),
+    ...Object.entries(data.models || {}),
+  ];
+  let best: { key: string; tier: PricingTier } | null = null;
+  for (const [key, tier] of allEntries) {
+    if (model.includes(key) && (!best || key.length > best.key.length)) {
+      best = { key, tier: tier as PricingTier };
+    }
+  }
+  return best?.tier || null;
+}
+
+const FALLBACK_PRICING: PricingTier = { input: 2.0, cached: 0.50, output: 8.0 };
+
 function computePrice(
-  provider: AIProvider,
+  _provider: AIProvider,
   model: string,
   inputTokens: number,
   outputTokens: number,
   cachedTokens: number,
   thinkingTokens: number,
 ): string {
-  const pricing = getPricing(provider, model, inputTokens);
+  const pricing = lookupPricing(model) || FALLBACK_PRICING;
   const uncachedInput = Math.max(0, inputTokens - cachedTokens);
   const totalOutput = outputTokens + (thinkingTokens || 0);
   const price =
