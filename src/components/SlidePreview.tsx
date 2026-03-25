@@ -1,5 +1,5 @@
 import React, { KeyboardEvent, useEffect, useRef, useState } from "react";
-import { Loader2, Save, History, Clock, Pencil, Check, Trash2, X, Play, Download } from "lucide-react";
+import { Loader2, Save, History, Clock, Pencil, Check, Trash2, X, Play, Download, Palette } from "lucide-react";
 import CodeEditor from "./CodeEditor";
 import { useLanguage } from "../hooks/useLanguage";
 import { VersionState, ViewMode } from "@/types";
@@ -88,6 +88,228 @@ const normalizeHexColor = (value: string, fallback: string = DEFAULT_ARROW_COLOR
   return fallback.toLowerCase();
 };
 
+interface HsvColor {
+  h: number;
+  s: number;
+  v: number;
+}
+
+const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
+
+const hexToRgb = (value: string): { r: number; g: number; b: number } => {
+  const normalized = normalizeHexColor(value);
+  return {
+    r: parseInt(normalized.slice(1, 3), 16),
+    g: parseInt(normalized.slice(3, 5), 16),
+    b: parseInt(normalized.slice(5, 7), 16),
+  };
+};
+
+const rgbToHex = (r: number, g: number, b: number): string =>
+  `#${[r, g, b].map((part) => clamp(Math.round(part), 0, 255).toString(16).padStart(2, '0')).join('')}`;
+
+const rgbToHsv = (r: number, g: number, b: number): HsvColor => {
+  const rn = r / 255;
+  const gn = g / 255;
+  const bn = b / 255;
+  const max = Math.max(rn, gn, bn);
+  const min = Math.min(rn, gn, bn);
+  const delta = max - min;
+
+  let h = 0;
+  if (delta !== 0) {
+    if (max === rn) h = ((gn - bn) / delta) % 6;
+    else if (max === gn) h = (bn - rn) / delta + 2;
+    else h = (rn - gn) / delta + 4;
+    h *= 60;
+    if (h < 0) h += 360;
+  }
+
+  return {
+    h,
+    s: max === 0 ? 0 : delta / max,
+    v: max,
+  };
+};
+
+const hsvToRgb = (h: number, s: number, v: number): { r: number; g: number; b: number } => {
+  const hue = ((h % 360) + 360) % 360;
+  const chroma = v * s;
+  const x = chroma * (1 - Math.abs(((hue / 60) % 2) - 1));
+  const m = v - chroma;
+
+  let rPrime = 0;
+  let gPrime = 0;
+  let bPrime = 0;
+
+  if (hue < 60) {
+    rPrime = chroma; gPrime = x;
+  } else if (hue < 120) {
+    rPrime = x; gPrime = chroma;
+  } else if (hue < 180) {
+    gPrime = chroma; bPrime = x;
+  } else if (hue < 240) {
+    gPrime = x; bPrime = chroma;
+  } else if (hue < 300) {
+    rPrime = x; bPrime = chroma;
+  } else {
+    rPrime = chroma; bPrime = x;
+  }
+
+  return {
+    r: (rPrime + m) * 255,
+    g: (gPrime + m) * 255,
+    b: (bPrime + m) * 255,
+  };
+};
+
+const hexToHsv = (value: string): HsvColor => {
+  const { r, g, b } = hexToRgb(value);
+  return rgbToHsv(r, g, b);
+};
+
+const hsvToHex = ({ h, s, v }: HsvColor): string => {
+  const { r, g, b } = hsvToRgb(h, s, v);
+  return rgbToHex(r, g, b).toLowerCase();
+};
+
+interface ColorPickerPopoverProps {
+  value: string;
+  inputValue: string;
+  onInputChange: (value: string) => void;
+  onColorChange: (value: string) => void;
+}
+
+const ColorPickerPopover = ({
+  value,
+  inputValue,
+  onInputChange,
+  onColorChange,
+}: ColorPickerPopoverProps) => {
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const hueBarRef = useRef<HTMLDivElement | null>(null);
+  const isDraggingRef = useRef(false);
+  const isHueDraggingRef = useRef(false);
+  const [activeHue, setActiveHue] = useState(() => hexToHsv(value).h);
+  const hsv = hexToHsv(value);
+  const displayHue = hsv.s === 0 || hsv.v === 0 ? activeHue : hsv.h;
+
+  useEffect(() => {
+    if (hsv.s > 0 && hsv.v > 0) {
+      setActiveHue(hsv.h);
+    }
+  }, [hsv.h, hsv.s, hsv.v]);
+
+  const updateFromPointer = (clientX: number, clientY: number) => {
+    const panel = panelRef.current;
+    if (!panel) return;
+    const rect = panel.getBoundingClientRect();
+    const saturation = clamp((clientX - rect.left) / rect.width, 0, 1);
+    const brightness = 1 - clamp((clientY - rect.top) / rect.height, 0, 1);
+    onColorChange(hsvToHex({ h: displayHue, s: saturation, v: brightness }));
+  };
+
+  const updateHueFromPointer = (clientX: number) => {
+    const hueBar = hueBarRef.current;
+    if (!hueBar) return;
+    const rect = hueBar.getBoundingClientRect();
+    const ratio = clamp((clientX - rect.left) / rect.width, 0, 1);
+    const nextHue = ratio * 360;
+    setActiveHue(nextHue);
+    onColorChange(hsvToHex({ h: nextHue, s: hsv.s, v: hsv.v }));
+  };
+
+  useEffect(() => {
+    const handlePointerMove = (event: PointerEvent) => {
+      if (isDraggingRef.current) {
+        updateFromPointer(event.clientX, event.clientY);
+      }
+      if (isHueDraggingRef.current) {
+        updateHueFromPointer(event.clientX);
+      }
+    };
+    const handlePointerUp = () => {
+      isDraggingRef.current = false;
+      isHueDraggingRef.current = false;
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+    };
+  });
+
+  return (
+    <div className="absolute left-0 top-full mt-3 w-[18.5rem] rounded-[1.2rem] border border-white/10 bg-[#101826]/97 p-3.5 shadow-[0_26px_80px_rgba(0,0,0,0.52)] backdrop-blur-xl z-20">
+      <div
+        ref={panelRef}
+        role="presentation"
+        onPointerDown={(event) => {
+          isDraggingRef.current = true;
+          updateFromPointer(event.clientX, event.clientY);
+        }}
+        className="relative mb-3 h-40 w-full cursor-crosshair border border-white/12 shadow-inner touch-none"
+        style={{ backgroundColor: `hsl(${displayHue} 100% 50%)` }}
+      >
+        <div className="absolute inset-0 bg-gradient-to-r from-white to-transparent" />
+        <div className="absolute inset-0 bg-gradient-to-t from-black to-transparent" />
+        <div
+          className="pointer-events-none absolute h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white shadow-[0_0_0_1px_rgba(15,23,42,0.7)]"
+          style={{
+            left: `${hsv.s * 100}%`,
+            top: `${(1 - hsv.v) * 100}%`,
+            backgroundColor: value,
+          }}
+        />
+      </div>
+
+      <div
+        ref={hueBarRef}
+        role="presentation"
+        onPointerDown={(event) => {
+          isHueDraggingRef.current = true;
+          updateHueFromPointer(event.clientX);
+        }}
+        className="relative mb-3 h-3 w-full cursor-pointer rounded-full border border-white/10 touch-none"
+        style={{
+          background:
+            'linear-gradient(90deg, #ff0000 0%, #ffff00 17%, #00ff00 33%, #00ffff 50%, #0000ff 67%, #ff00ff 83%, #ff0000 100%)',
+        }}
+      >
+        <div
+          className="pointer-events-none absolute top-1/2 h-5 w-5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white shadow-[0_0_0_1px_rgba(15,23,42,0.78)]"
+          style={{
+            left: `${(displayHue / 360) * 100}%`,
+            backgroundColor: hsvToHex({ h: displayHue, s: 1, v: 1 }),
+          }}
+        />
+      </div>
+
+      <div className="flex items-center gap-3 rounded-[1rem] border border-white/10 bg-white/[0.035] px-3 py-2.5">
+        <div
+          className="h-8 w-8 shrink-0 rounded-[0.8rem] border border-white/15 shadow-inner"
+          style={{ backgroundColor: value }}
+        />
+        <input
+          type="text"
+          value={inputValue}
+          onChange={(e) => onInputChange(e.target.value)}
+          onBlur={(e) => onColorChange(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              onColorChange(inputValue);
+            }
+          }}
+          className="w-full bg-transparent text-sm font-mono uppercase text-white outline-none placeholder:text-slate-500"
+          placeholder="#ffffff"
+        />
+      </div>
+    </div>
+  );
+};
+
 const buildArrowColorStyle = (color: string): string => `
 <style data-nav-arrow-color>
   .reveal .controls,
@@ -121,6 +343,9 @@ const applyArrowColor = (content: string, color: string): string => {
 
   return `${styleTag}\n${cleaned}`;
 };
+
+const stripArrowColor = (content: string): string =>
+  content.replace(/\s*<style data-nav-arrow-color>[\s\S]*?<\/style>/gi, '');
 
 const AUTO_SLIDE_SCRIPT_REGEX = /\s*<script[^>]*data-auto-slide-config[^>]*>[\s\S]*?<\/script>/gi;
 
@@ -730,6 +955,7 @@ export default function SlidePreview({
     saveButton: t('slidePreview.saveButton'),
     unsavedChanges: t('slidePreview.unsavedChanges'),
     savedStatus: t('slidePreview.savedStatus'),
+    textColor: t('slidePreview.textColor'),
   };
 
   const PLACEHOLDER_SLIDES = `<!doctype html>
@@ -797,6 +1023,7 @@ export default function SlidePreview({
     ),
     arrowColor
   );
+  const editorFrameContent = stripArrowColor(editorPreviewContent);
 
   const createPresentDocument = (html: string): string | null => {
     const docKey = `openslides_present_${Date.now()}_${Math.random().toString(36).slice(2)}`;
@@ -876,6 +1103,24 @@ export default function SlidePreview({
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
   }, [arrowColor, autoPlayIntervalMs, isAutoPlayEnabled, onEditorChange, sectionTransition]);
+
+  const postArrowColorToEditor = (color: string) => {
+    const editorFrame = editorFrameRef.current;
+    if (!editorFrame?.contentWindow) return;
+
+    editorFrame.contentWindow.postMessage(
+      {
+        type: 'inline-editor-set-arrow-color',
+        color,
+      },
+      '*'
+    );
+  };
+
+  useEffect(() => {
+    if (viewMode !== 'editor') return;
+    postArrowColorToEditor(arrowColor);
+  }, [arrowColor, viewMode]);
 
   const handleViewChange = (mode: ViewMode) => {
     if (mode === viewMode) return;
@@ -1180,41 +1425,30 @@ export default function SlidePreview({
             <span className="text-gray-400">{t('slidePreview.arrowColor')}</span>
             <button
               type="button"
-              onClick={() => setIsArrowColorOpen((open) => !open)}
-              className="flex items-center gap-2 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-blue-500 transition-colors"
+              onClick={() => {
+                setArrowColorInput(arrowColor);
+                setIsArrowColorOpen((open) => !open);
+              }}
+              className="group flex items-center gap-2.5 rounded-xl border border-white/10 bg-[#111827]/72 px-3 py-2 text-sm text-white transition-all hover:border-white/20 hover:bg-[#162033]"
             >
-              <span
-                className="h-4 w-4 rounded border border-white/20"
+              <div
+                className="h-5 w-5 rounded-lg border border-white/20 shadow-inner"
                 style={{ backgroundColor: arrowColor }}
               />
-              <span className="font-mono uppercase">{arrowColor}</span>
+              <span className="font-mono text-sm uppercase text-white">{arrowColor}</span>
+              <Palette size={15} className="text-slate-400 transition-colors group-hover:text-slate-200" />
             </button>
 
             {isArrowColorOpen && (
-              <div className="absolute left-0 top-full mt-2 w-56 rounded-xl border border-gray-700 bg-gray-900 p-3 shadow-2xl z-20">
-                <div className="flex flex-col gap-3">
-                  <input
-                    type="color"
-                    value={arrowColor}
-                    onChange={(e) => handleArrowColorChange(e.target.value)}
-                    className="h-12 w-full cursor-pointer rounded-lg border border-gray-700 bg-transparent"
-                  />
-                  <input
-                    type="text"
-                    value={arrowColorInput}
-                    onChange={(e) => setArrowColorInput(e.target.value)}
-                    onBlur={(e) => handleArrowColorChange(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        handleArrowColorChange(arrowColorInput);
-                        setIsArrowColorOpen(false);
-                      }
-                    }}
-                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white font-mono uppercase focus:outline-none focus:border-blue-500"
-                    placeholder="#ffffff"
-                  />
-                </div>
-              </div>
+              <ColorPickerPopover
+                value={arrowColor}
+                inputValue={arrowColorInput}
+                onInputChange={setArrowColorInput}
+                onColorChange={(value) => {
+                  handleArrowColorChange(value);
+                  setArrowColorInput(normalizeHexColor(value, arrowColor));
+                }}
+              />
             )}
           </div>
 
@@ -1307,7 +1541,8 @@ export default function SlidePreview({
                 ref={editorFrameRef}
                 key={sectionTransition}
                 title="Slide Editor"
-                srcDoc={injectInlineEditor(editorPreviewContent, inlineEditorLabels)}
+                srcDoc={injectInlineEditor(editorFrameContent, inlineEditorLabels)}
+                onLoad={() => postArrowColorToEditor(arrowColor)}
                 style={{
                   border: 0,
                   borderRadius: '8px',
