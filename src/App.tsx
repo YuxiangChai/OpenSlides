@@ -4,6 +4,7 @@ import Dashboard from "./components/Dashboard";
 import ProjectDetail from "./components/ProjectDetail";
 import SettingsModal from "./components/SettingsModal";
 import { Project, CurrentView } from '@/types';
+import { fetchJson } from "@/lib/http";
 
 function buildPresentDocument(html: string): string {
   return html;
@@ -41,9 +42,7 @@ export default function App() {
 
     setIsRestoringProject(true);
     try {
-      const res = await fetch('/api/projects');
-      if (!res.ok) throw new Error(`Failed to load projects: ${res.status}`);
-      const projects: Project[] = await res.json();
+      const projects = await fetchJson<Project[]>('/api/projects', undefined, 'Failed to load projects');
       const project = projects.find((p) => p.id === projectId) || null;
 
       if (project) {
@@ -74,15 +73,24 @@ export default function App() {
     return () => window.removeEventListener('popstate', handlePopState);
   }, [isPresentRoute]);
 
-  useEffect(() => {
-    if (!isPresentRoute || !presentHtml) return;
-    document.open();
-    document.write(presentHtml);
-    document.close();
-  }, [isPresentRoute, presentHtml]);
-
   if (isPresentRoute) {
-    return null;
+    return (
+      <div className="w-screen h-screen bg-black">
+        {presentHtml ? (
+          <iframe
+            title="Presentation"
+            srcDoc={presentHtml}
+            className="w-full h-full border-0"
+            sandbox="allow-scripts allow-popups allow-downloads allow-pointer-lock"
+            allow="fullscreen"
+          />
+        ) : (
+          <div className="w-full h-full flex items-center justify-center text-sm text-white/70">
+            Presentation content is unavailable for this tab.
+          </div>
+        )}
+      </div>
+    );
   }
 
   return (
@@ -100,15 +108,11 @@ export default function App() {
         onRename={async (newName: string) => {
           if (!selectedProject) return;
           try {
-            const res = await fetch(`/api/projects/${selectedProject.id}`, {
+            const updatedProject = await fetchJson<Project>(`/api/projects/${encodeURIComponent(selectedProject.id)}`, {
               method: 'PATCH',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ name: newName }),
-            });
-            if (!res.ok) {
-              throw new Error(`Failed to rename project: ${res.status}`);
-            }
-            const updatedProject: Project = await res.json();
+            }, 'Failed to rename project');
             setSelectedProject(updatedProject);
           } catch (error) {
             console.error('Failed to rename project:', error);

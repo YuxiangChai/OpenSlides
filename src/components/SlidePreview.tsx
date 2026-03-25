@@ -215,10 +215,12 @@ const buildAutoSlideScript = (enabled: boolean, intervalMs: number): string => {
   }
 
   function setConfiguredAutoSlide(ms) {
-    var config = getRevealConfig();
-    if (!config) return;
-    config.autoSlide = ms;
-    config.autoSlideStoppable = true;
+    var reveal = getReveal();
+    if (!reveal || !reveal.configure) return;
+    reveal.configure({
+      autoSlide: ms,
+      autoSlideStoppable: true
+    });
   }
 
   function syncCycleAfterRevealTick(nextDuration) {
@@ -291,6 +293,10 @@ const buildAutoSlideScript = (enabled: boolean, intervalMs: number): string => {
     document.addEventListener('autoslideresumed', function() {
       var resumeDuration = Math.max(1, parseAutoSlideMs(remainingAutoSlideMs, getCurrentAutoSlideMs()));
       setConfiguredAutoSlide(resumeDuration);
+      var reveal = getReveal();
+      if (reveal && reveal.resumeAutoSlide) {
+        reveal.resumeAutoSlide();
+      }
       syncCycleAfterRevealTick(resumeDuration);
     });
 
@@ -717,6 +723,7 @@ export default function SlidePreview({
   const [overflowSlides, setOverflowSlides] = useState<{index: number; title: string}[]>([]);
   const { t } = useLanguage();
   const arrowColorPopoverRef = useRef<HTMLDivElement | null>(null);
+  const editorFrameRef = useRef<HTMLIFrameElement | null>(null);
   const inlineEditorLabels = {
     clickToEdit: t('slidePreview.clickToEdit'),
     savedButton: t('slidePreview.savedButton'),
@@ -845,6 +852,11 @@ export default function SlidePreview({
   // Listen for inline editor saves from the iframe
   useEffect(() => {
     const handleMessage = (e: MessageEvent) => {
+      const editorFrame = editorFrameRef.current;
+      if (!editorFrame || e.source !== editorFrame.contentWindow) {
+        return;
+      }
+
       if (e.data?.type === 'inline-editor-save' && e.data.html) {
         const updatedContent = applyArrowColor(
           applyAutoSlide(
@@ -1292,6 +1304,7 @@ export default function SlidePreview({
             )}
             <div className="flex-1 flex items-center justify-center p-4 overflow-hidden">
               <iframe
+                ref={editorFrameRef}
                 key={sectionTransition}
                 title="Slide Editor"
                 srcDoc={injectInlineEditor(editorPreviewContent, inlineEditorLabels)}
@@ -1302,7 +1315,7 @@ export default function SlidePreview({
                   aspectRatio: '16/9',
                   maxHeight: '100%',
                 }}
-                sandbox="allow-scripts allow-same-origin"
+                sandbox="allow-scripts"
               />
             </div>
           </div>

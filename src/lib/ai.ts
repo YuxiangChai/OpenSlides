@@ -258,12 +258,13 @@ export async function loadConfig(): Promise<AIConfig> {
     const data = await res.json();
     _cachedConfig = {
       provider: data.provider || 'gemini',
-      apiKey: data.apiKey || '',
+      apiKey: '',
       model: data.model || '',
       baseUrl: data.baseUrl || '',
+      hasStoredApiKey: Boolean(data.hasApiKey),
     };
   } catch {
-    _cachedConfig = { provider: 'gemini', apiKey: '', model: '', baseUrl: '' };
+    _cachedConfig = { provider: 'gemini', apiKey: '', model: '', baseUrl: '', hasStoredApiKey: false };
   }
   // Also load pricing data
   await loadPricing();
@@ -272,7 +273,7 @@ export async function loadConfig(): Promise<AIConfig> {
 
 export function getConfig(): AIConfig {
   // Return cached config if available, otherwise defaults
-  return _cachedConfig || { provider: 'gemini', apiKey: '', model: '', baseUrl: '' };
+  return _cachedConfig || { provider: 'gemini', apiKey: '', model: '', baseUrl: '', hasStoredApiKey: false };
 }
 
 function getDefaultModel(provider: AIProvider): string {
@@ -398,32 +399,26 @@ function normalizeHistoryMessage(msg: ChatMessage): string {
 
 function buildReferenceMessage(
   projectId: string,
-  textContents: string[],
-  fileAttachments: Array<{ data: string; mimeType: string }>,
-  imageFiles: Array<{ name: string; mimeType: string }>
+  projectFiles: LocalFile[]
 ): { role: string; content: string; files?: Array<{ data: string; mimeType: string }> } | null {
-  if (textContents.length === 0 && fileAttachments.length === 0 && imageFiles.length === 0) return null;
+  if (!Array.isArray(projectFiles) || projectFiles.length === 0) return null;
 
   const sections: string[] = ['[Project reference material]'];
-  if (textContents.length > 0) {
-    sections.push('Use these uploaded text documents as source material:');
-    sections.push(textContents.join('\n\n'));
-  }
-  if (fileAttachments.length > 0) {
-    sections.push('Attached images and PDFs are also part of the project context.');
-  }
+  sections.push('The system is attaching the project source files separately. Use them as primary source material.');
+  sections.push(`Available project files: ${projectFiles.map((file) => file.name).join(', ')}`);
+
   // Tell the AI the exact URLs for images so it can reference them in <img> tags
+  const imageFiles = projectFiles.filter((file) => file.mimeType.startsWith('image/'));
   if (imageFiles.length > 0) {
     sections.push('The following uploaded images are available. Use them in the slides with <img> tags using the EXACT URLs below:');
     for (const f of imageFiles) {
-      sections.push(`- ${f.name}: /api/projects/${projectId}/file/${encodeURIComponent(f.name)}`);
+      sections.push(`- ${f.name}: ${f.url || `/api/projects/${projectId}/file/${encodeURIComponent(f.name)}`}`);
     }
   }
 
   return {
     role: 'user',
     content: sections.join('\n\n'),
-    files: fileAttachments.length > 0 ? fileAttachments : undefined,
   };
 }
 
@@ -442,44 +437,14 @@ export const generateSlides = async (
 ): Promise<GenerateSlidesResponse> => {
   const config = await loadConfig();
   const model = config.model || getDefaultModel(config.provider);
-  const useProviderManagedFileHandling =
-    config.provider === 'gemini' ||
-    (config.provider === 'openai' && isNativeOpenAIBaseUrl(config.baseUrl));
 
-  if (!config.apiKey) {
+  if (!config.apiKey && !config.hasStoredApiKey) {
     throw new Error('NO_API_KEY');
-  }
-
-  // Build file context
-  const textContents: string[] = [];
-  const fileAttachments: Array<{ data: string; mimeType: string }> = [];
-  const imageFiles: Array<{ name: string; mimeType: string }> = [];
-
-  if (files && files.length > 0) {
-    for (const file of files) {
-      const mime = file.mimeType;
-      const base64Data = file.dataUrl.split(',')[1];
-
-      if (mime.startsWith('image/')) {
-        // Always track image files so the AI can reference them by URL in slides
-        imageFiles.push({ name: file.name, mimeType: mime });
-        // Also send as visual attachment for AI context (non-provider-managed only)
-        if (!useProviderManagedFileHandling) {
-          fileAttachments.push({ data: base64Data, mimeType: mime });
-        }
-      } else if (!useProviderManagedFileHandling && (mime.startsWith('text/') || mime === 'application/json' || file.name.endsWith('.csv'))) {
-        const text = atob(base64Data);
-        textContents.push(`--- File: ${file.name} ---\n${text}`);
-      } else if (!useProviderManagedFileHandling && mime === 'application/pdf') {
-        fileAttachments.push({ data: base64Data, mimeType: mime });
-      }
-    }
   }
 
   // Build messages array
   const messages: Array<{ role: string; content: string; files?: Array<{ data: string; mimeType: string }> }> = [];
-  const referenceMessage = buildReferenceMessage(projectId, textContents,
-    useProviderManagedFileHandling ? [] : fileAttachments, imageFiles);
+  const referenceMessage = buildReferenceMessage(projectId, files || []);
 
   if (referenceMessage) {
     messages.push(referenceMessage);
@@ -535,12 +500,10 @@ export const generateSlides = async (
       provider: config.provider,
       model,
       projectId,
-      apiKey: config.apiKey,
       baseUrl: config.baseUrl,
       system: SYSTEM_INSTRUCTION,
       messages,
       temperature: 0.7,
-      files: files || [],
     }),
   });
 

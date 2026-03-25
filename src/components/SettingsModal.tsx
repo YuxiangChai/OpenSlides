@@ -3,6 +3,7 @@ import { X, Check, AlertCircle, Key, Cpu, Eye, EyeOff, Globe, DollarSign } from 
 import { useLanguage } from "../hooks/useLanguage";
 import { AIProvider } from "@/types";
 import { lookupPricing } from "@/lib/ai";
+import { fetchJson, fetchOk } from "@/lib/http";
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -18,6 +19,7 @@ const PROVIDER_OPTIONS: { value: AIProvider; label: string; defaultModel: string
 export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const [provider, setProvider] = useState<AIProvider>('gemini');
   const [apiKey, setApiKey] = useState("");
+  const [hasStoredApiKey, setHasStoredApiKey] = useState(false);
   const [modelName, setModelName] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [showApiKey, setShowApiKey] = useState(false);
@@ -33,23 +35,23 @@ export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       setPriceInput("");
       setPriceCached("");
       setPriceOutput("");
-      fetch('/api/settings')
-        .then(res => res.json())
+      fetchJson<any>('/api/settings', undefined, 'Failed to load settings')
         .then(data => {
           setProvider(data.provider || 'gemini');
-          setApiKey(data.apiKey || '');
+          setApiKey('');
+          setHasStoredApiKey(Boolean(data.hasApiKey));
           setModelName(data.model || '');
           setBaseUrl(data.baseUrl || '');
         })
         .catch(() => {
           setProvider('gemini');
           setApiKey('');
+          setHasStoredApiKey(false);
           setModelName('');
           setBaseUrl('');
         });
       // Load custom pricing for current model
-      fetch('/api/pricing')
-        .then(res => res.json())
+      fetchJson<any>('/api/pricing', undefined, 'Failed to load pricing')
         .then(data => {
           // Will be updated when model name changes via the other effect
           setPricingData(data);
@@ -95,21 +97,23 @@ export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     try {
       const settings = {
         provider,
-        apiKey: apiKey.trim(),
         model: modelName.trim(),
         baseUrl: baseUrl.trim(),
+        ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
       };
-      const res = await fetch('/api/settings', {
+      const res = await fetchOk('/api/settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(settings),
-      });
-      if (!res.ok) throw new Error('Failed to save');
+      }, 'Failed to save settings');
+      const data = await res.json();
+      setHasStoredApiKey(Boolean(data.hasApiKey));
+      setApiKey('');
 
       // Save custom pricing if any field is filled
       if (priceInput || priceCached || priceOutput) {
         const base = defaultPricing || { input: 2.0, cached: 0.5, output: 8.0 };
-        await fetch('/api/pricing/custom', {
+        await fetchOk('/api/pricing/custom', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -118,7 +122,7 @@ export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
             cached: priceCached ? Number(priceCached) : base.cached,
             output: priceOutput ? Number(priceOutput) : base.output,
           }),
-        });
+        }, 'Failed to save pricing');
       }
 
       setSaveStatus('success');
@@ -203,7 +207,7 @@ export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                   value={apiKey}
                   onChange={(e) => setApiKey(e.target.value)}
                   className="w-full bg-black/30 border border-[#2e2e30] rounded-lg px-4 py-2 text-white focus:outline-none focus:border-blue-500 transition-colors pr-10"
-                  placeholder="sk-..."
+                  placeholder={hasStoredApiKey ? t('settings.apiKeyStoredPlaceholder') : "sk-..."}
                 />
                 <button
                   type="button"
@@ -213,6 +217,9 @@ export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                   {showApiKey ? <EyeOff size={18} /> : <Eye size={18} />}
                 </button>
               </div>
+              <p className="text-xs text-gray-500">
+                {hasStoredApiKey ? t('settings.apiKeyStoredHint') : t('settings.apiKeyNewHint')}
+              </p>
             </div>
 
             {/* Model Name */}

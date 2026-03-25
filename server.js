@@ -8,6 +8,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 3001;
 const PROJECTS_DIR = path.join(__dirname, 'projects');
+const PROJECTS_META_PATH = path.join(PROJECTS_DIR, '_projects.json');
+const SETTINGS_PATH = path.join(__dirname, 'settings.json');
+const PRICING_PATH = path.join(__dirname, 'pricing.json');
+const SAFE_PROJECT_ID_REGEX = /^[a-z0-9][a-z0-9-]{2,63}$/;
+const STATE_ID_REGEX = /^(?:state|auto)_\d+$/;
+const ASSETS_DIRNAME = 'assets';
 
 // Ensure projects directory exists
 if (!fs.existsSync(PROJECTS_DIR)) {
@@ -34,7 +40,385 @@ const GEMINI_FILE_POLL_TIMEOUT_MS = 60000;
 const GEMINI_GENERATE_TIMEOUT_MS = 180000;
 const GEMINI_RETRY_DELAY_MS = 1200;
 const GEMINI_MAX_RETRIES = 3;
+const SUPPORTED_PROVIDERS = new Set(Object.keys(DEFAULT_BASE_URLS));
 
+function createHttpError(status, message) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+}
+
+function readJsonFile(filePath, fallbackValue) {
+  try {
+    if (!fs.existsSync(filePath)) return fallbackValue;
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    if (!raw.trim()) return fallbackValue;
+    return JSON.parse(raw);
+  } catch {
+    return fallbackValue;
+  }
+}
+
+function writeJsonFile(filePath, value) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tempPath, JSON.stringify(value, null, 2));
+  fs.renameSync(tempPath, filePath);
+}
+
+function isSafeProjectId(projectId) {
+  return typeof projectId === 'string' && SAFE_PROJECT_ID_REGEX.test(projectId);
+}
+
+function assertSafeProjectId(projectId) {
+  if (!isSafeProjectId(projectId)) {
+    throw createHttpError(400, 'Invalid project id');
+  }
+  return projectId;
+}
+
+function normalizeProjectName(name, fallback = 'Untitled Project') {
+  const trimmed = typeof name === 'string' ? name.trim() : '';
+  return trimmed || fallback;
+}
+
+function validateProjectName(name) {
+  const normalized = normalizeProjectName(name, '');
+  if (!normalized) {
+    throw createHttpError(400, 'Project name is required');
+  }
+  if (normalized.length > 120) {
+    throw createHttpError(400, 'Project name is too long');
+  }
+  return normalized;
+}
+
+function slugifyProjectName(name) {
+  const slug = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return (slug || 'project').slice(0, 48);
+}
+
+function createProjectId(name, usedIds = new Set()) {
+  const base = slugifyProjectName(name);
+  if (SAFE_PROJECT_ID_REGEX.test(base) && !usedIds.has(base)) {
+    return base;
+  }
+
+  let candidate = '';
+  do {
+    const suffix = crypto.randomBytes(3).toString('hex');
+    candidate = `${base.slice(0, 57)}-${suffix}`;
+  } while (usedIds.has(candidate) || !SAFE_PROJECT_ID_REGEX.test(candidate));
+
+  return candidate;
+}
+
+function loadProjectsMeta() {
+  const projects = readJsonFile(PROJECTS_META_PATH, []);
+  return Array.isArray(projects) ? projects : [];
+}
+
+function saveProjectsMeta(projects) {
+  writeJsonFile(PROJECTS_META_PATH, projects);
+}
+
+function getLegacyProjectDir(projectId) {
+  if (typeof projectId !== 'string' || !projectId) return null;
+  const resolved = path.resolve(PROJECTS_DIR, projectId);
+  return resolved.startsWith(`${PROJECTS_DIR}${path.sep}`) ? resolved : null;
+}
+
+function getProject(projectId) {
+  const safeProjectId = assertSafeProjectId(projectId);
+  return loadProjectsMeta().find((project) => project.id === safeProjectId) || null;
+}
+
+function requireProject(projectId) {
+  const project = getProject(projectId);
+  if (!project) {
+    throw createHttpError(404, 'Project not found');
+  }
+  return project;
+}
+
+function validateStateId(stateId) {
+  if (typeof stateId !== 'string' || !STATE_ID_REGEX.test(stateId)) {
+    throw createHttpError(400, 'Invalid state id');
+  }
+  return stateId;
+}
+
+function sanitizeDisplayFileName(name) {
+  const normalized = path.basename(normalizeProjectName(name, ''));
+  const safeName = normalized.replace(/[<>:"/\\|?*\x00-\x1F]/g, '-').trim();
+  if (!safeName) {
+    throw createHttpError(400, 'Invalid file name');
+  }
+  return safeName.slice(0, 200);
+}
+
+function getProjectFilesPath(projectId) {
+  return path.join(getProjectDir(projectId), 'files.json');
+}
+
+function getProjectAssetsDir(projectId) {
+  return path.join(getProjectDir(projectId), ASSETS_DIRNAME);
+}
+
+function getProjectAssetPath(projectId, assetName) {
+  const safeAssetName = path.basename(assetName || '');
+  const assetPath = path.resolve(getProjectAssetsDir(projectId), safeAssetName);
+  const assetsDir = path.resolve(getProjectAssetsDir(projectId));
+  if (!assetPath.startsWith(`${assetsDir}${path.sep}`)) {
+    throw createHttpError(400, 'Invalid asset path');
+  }
+  return assetPath;
+}
+
+function createStoredAssetName(fileName) {
+  const extension = path.extname(fileName || '').toLowerCase().replace(/[^.\w-]/g, '').slice(0, 20);
+  return `${Date.now()}-${crypto.randomBytes(6).toString('hex')}${extension}`;
+}
+
+function parseDataUrl(dataUrl) {
+  const match = typeof dataUrl === 'string' ? dataUrl.match(/^data:([^;]+);base64,(.+)$/) : null;
+  if (!match) {
+    throw createHttpError(400, 'Invalid file data');
+  }
+  return {
+    mimeType: match[1],
+    buffer: Buffer.from(match[2], 'base64'),
+  };
+}
+
+function sanitizeIncomingUploadFiles(files) {
+  if (!Array.isArray(files)) {
+    throw createHttpError(400, 'Files payload must be an array');
+  }
+
+  return files.map((file, index) => {
+    const name = sanitizeDisplayFileName(file?.name);
+    if (!name) {
+      throw createHttpError(400, `File ${index + 1} is missing a name`);
+    }
+
+    const dataUrl = typeof file?.dataUrl === 'string' ? file.dataUrl : '';
+    if (!/^data:[^;]+;base64,/.test(dataUrl)) {
+      throw createHttpError(400, `File ${name} has invalid data`);
+    }
+
+    return {
+      name,
+      dataUrl,
+      mimeType: typeof file?.mimeType === 'string' ? file.mimeType : 'application/octet-stream',
+      size: Number.isFinite(Number(file?.size)) ? Number(file.size) : 0,
+    };
+  });
+}
+
+function isLegacyStoredFile(file) {
+  return typeof file?.dataUrl === 'string';
+}
+
+function normalizeStoredFileEntry(file) {
+  if (!file || typeof file !== 'object') return null;
+  const name = sanitizeDisplayFileName(file.name);
+  const assetPath = path.basename(typeof file.assetPath === 'string' ? file.assetPath : '');
+  if (!assetPath) {
+    throw createHttpError(500, `Stored asset is missing for ${name}`);
+  }
+  return {
+    name,
+    mimeType: typeof file.mimeType === 'string' ? file.mimeType : 'application/octet-stream',
+    size: Number.isFinite(Number(file.size)) ? Number(file.size) : 0,
+    created_at: typeof file.created_at === 'string' && file.created_at ? file.created_at : new Date().toISOString(),
+    assetPath,
+  };
+}
+
+function buildPublicFileRecord(projectId, file) {
+  return {
+    name: file.name,
+    mimeType: file.mimeType,
+    size: file.size,
+    created_at: file.created_at,
+    url: `/api/projects/${encodeURIComponent(projectId)}/file/${encodeURIComponent(file.name)}`,
+  };
+}
+
+function removeAssetIfPresent(projectId, assetName) {
+  if (!assetName) return;
+  const assetPath = getProjectAssetPath(projectId, assetName);
+  if (fs.existsSync(assetPath)) {
+    fs.unlinkSync(assetPath);
+  }
+}
+
+function loadStoredProjectFiles(projectId) {
+  const filesPath = getProjectFilesPath(projectId);
+  if (!fs.existsSync(filesPath)) return [];
+
+  const rawFiles = readJsonFile(filesPath, []);
+  if (!Array.isArray(rawFiles) || rawFiles.length === 0) return [];
+
+  let migrated = false;
+  const normalizedFiles = rawFiles.map((file) => {
+    if (isLegacyStoredFile(file)) {
+      const legacyName = sanitizeDisplayFileName(file.name);
+      const { mimeType, buffer } = parseDataUrl(file.dataUrl);
+      const assetName = createStoredAssetName(legacyName);
+      const assetPath = getProjectAssetPath(projectId, assetName);
+      fs.writeFileSync(assetPath, buffer);
+      migrated = true;
+      return {
+        name: legacyName,
+        mimeType: typeof file.mimeType === 'string' ? file.mimeType : mimeType,
+        size: Number.isFinite(Number(file.size)) && Number(file.size) > 0 ? Number(file.size) : buffer.length,
+        created_at: typeof file.created_at === 'string' && file.created_at ? file.created_at : new Date().toISOString(),
+        assetPath: assetName,
+      };
+    }
+
+    return normalizeStoredFileEntry(file);
+  }).filter(Boolean);
+
+  if (migrated) {
+    writeJsonFile(filesPath, normalizedFiles);
+  }
+
+  return normalizedFiles;
+}
+
+function saveStoredProjectFiles(projectId, files) {
+  writeJsonFile(getProjectFilesPath(projectId), files);
+}
+
+function upsertProjectFiles(projectId, incomingFiles) {
+  const sanitizedFiles = sanitizeIncomingUploadFiles(incomingFiles);
+  const existingFiles = loadStoredProjectFiles(projectId);
+  const nextFiles = [...existingFiles];
+
+  for (const incomingFile of sanitizedFiles) {
+    const { mimeType, buffer } = parseDataUrl(incomingFile.dataUrl);
+    const assetName = createStoredAssetName(incomingFile.name);
+    const assetPath = getProjectAssetPath(projectId, assetName);
+    fs.writeFileSync(assetPath, buffer);
+
+    const nextEntry = {
+      name: incomingFile.name,
+      mimeType: incomingFile.mimeType || mimeType,
+      size: incomingFile.size > 0 ? incomingFile.size : buffer.length,
+      created_at: new Date().toISOString(),
+      assetPath: assetName,
+    };
+
+    const existingIndex = nextFiles.findIndex((file) => file.name === incomingFile.name);
+    if (existingIndex >= 0) {
+      removeAssetIfPresent(projectId, nextFiles[existingIndex].assetPath);
+      nextFiles[existingIndex] = nextEntry;
+    } else {
+      nextFiles.push(nextEntry);
+    }
+  }
+
+  saveStoredProjectFiles(projectId, nextFiles);
+  return nextFiles;
+}
+
+function deleteStoredProjectFile(projectId, fileName) {
+  const normalizedName = sanitizeDisplayFileName(fileName);
+  const existingFiles = loadStoredProjectFiles(projectId);
+  const target = existingFiles.find((file) => file.name === normalizedName);
+  if (!target) {
+    throw createHttpError(404, 'File not found');
+  }
+
+  removeAssetIfPresent(projectId, target.assetPath);
+  saveStoredProjectFiles(projectId, existingFiles.filter((file) => file.name !== normalizedName));
+}
+
+function loadProjectFilesForAI(projectId) {
+  if (!getProject(projectId)) return [];
+
+  return loadStoredProjectFiles(projectId).map((file) => {
+    const buffer = fs.readFileSync(getProjectAssetPath(projectId, file.assetPath));
+    return {
+      name: file.name,
+      mimeType: file.mimeType,
+      size: file.size,
+      dataUrl: `data:${file.mimeType};base64,${buffer.toString('base64')}`,
+    };
+  });
+}
+
+function loadSettings() {
+  const settings = readJsonFile(SETTINGS_PATH, {});
+  return {
+    provider: SUPPORTED_PROVIDERS.has(settings.provider) ? settings.provider : 'gemini',
+    apiKey: typeof settings.apiKey === 'string' ? settings.apiKey.trim() : '',
+    model: typeof settings.model === 'string' ? settings.model.trim() : '',
+    baseUrl: typeof settings.baseUrl === 'string' ? settings.baseUrl.trim() : '',
+  };
+}
+
+function sanitizeBaseUrl(baseUrl, provider) {
+  const normalized = (baseUrl || DEFAULT_BASE_URLS[provider] || '').trim().replace(/\/$/, '');
+  if (!normalized) {
+    throw createHttpError(400, 'Base URL is required');
+  }
+
+  try {
+    new URL(normalized);
+  } catch {
+    throw createHttpError(400, 'Invalid base URL');
+  }
+
+  return normalized;
+}
+
+function migrateLegacyProjects() {
+  const projects = loadProjectsMeta();
+  if (projects.length === 0) return;
+
+  let changed = false;
+  const usedIds = new Set();
+  const now = new Date().toISOString();
+  const migratedProjects = projects.map((project) => {
+    const name = normalizeProjectName(project?.name, normalizeProjectName(project?.id, 'Untitled Project'));
+    const createdAt = typeof project?.created_at === 'string' && project.created_at ? project.created_at : now;
+    const lastAccessedAt = typeof project?.last_accessed_at === 'string' && project.last_accessed_at ? project.last_accessed_at : createdAt;
+    const nextId = isSafeProjectId(project?.id) && !usedIds.has(project.id)
+      ? project.id
+      : createProjectId(name, usedIds);
+
+    usedIds.add(nextId);
+
+    if (project?.id !== nextId || project?.name !== name || project?.created_at !== createdAt || project?.last_accessed_at !== lastAccessedAt) {
+      changed = true;
+    }
+
+    const legacyDir = getLegacyProjectDir(project?.id);
+    const nextDir = path.join(PROJECTS_DIR, nextId);
+    if (legacyDir && legacyDir !== nextDir && fs.existsSync(legacyDir) && !fs.existsSync(nextDir)) {
+      fs.renameSync(legacyDir, nextDir);
+    }
+    ensureProjectDir(nextId);
+
+    return {
+      id: nextId,
+      name,
+      created_at: createdAt,
+      last_accessed_at: lastAccessedAt,
+    };
+  });
+
+  if (changed) {
+    saveProjectsMeta(migratedProjects);
+  }
+}
 
 function isNativeOpenAIBaseUrl(baseUrl) {
   try {
@@ -46,13 +430,34 @@ function isNativeOpenAIBaseUrl(baseUrl) {
 }
 
 app.post('/api/generate', async (req, res) => {
-  const { provider, model, projectId, apiKey, baseUrl, system, messages, temperature = 0.7, files } = req.body;
+  const settings = loadSettings();
+  const provider = typeof req.body.provider === 'string' ? req.body.provider : settings.provider;
+  const model = typeof req.body.model === 'string' ? req.body.model : settings.model;
+  const projectId = typeof req.body.projectId === 'string' && isSafeProjectId(req.body.projectId)
+    ? req.body.projectId
+    : 'default-project';
+  const apiKey = typeof req.body.apiKey === 'string' && req.body.apiKey.trim()
+    ? req.body.apiKey.trim()
+    : settings.apiKey;
+  const system = typeof req.body.system === 'string' ? req.body.system : '';
+  const messages = Array.isArray(req.body.messages) ? req.body.messages : [];
+  const temperature = Number.isFinite(Number(req.body.temperature)) ? Number(req.body.temperature) : 0.7;
+  const files = loadProjectFilesForAI(projectId);
+
+  if (!SUPPORTED_PROVIDERS.has(provider)) {
+    return res.status(400).json({ error: 'Unsupported provider' });
+  }
 
   if (!apiKey) {
     return res.status(400).json({ error: 'No API key provided' });
   }
 
-  const base = (baseUrl || DEFAULT_BASE_URLS[provider] || '').replace(/\/$/, '');
+  let base;
+  try {
+    base = sanitizeBaseUrl(typeof req.body.baseUrl === 'string' ? req.body.baseUrl : settings.baseUrl, provider);
+  } catch (error) {
+    return res.status(error.status || 400).json({ error: error.message || 'Invalid base URL' });
+  }
 
   try {
     let result;
@@ -898,7 +1303,7 @@ function sanitizeMessages(messages) {
 // ============================================================
 
 function getProjectDir(projectId) {
-  return path.join(PROJECTS_DIR, projectId);
+  return path.join(PROJECTS_DIR, assertSafeProjectId(projectId));
 }
 
 function ensureProjectDir(projectId) {
@@ -906,172 +1311,273 @@ function ensureProjectDir(projectId) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   const statesDir = path.join(dir, 'states');
   if (!fs.existsSync(statesDir)) fs.mkdirSync(statesDir, { recursive: true });
+  const assetsDir = path.join(dir, ASSETS_DIRNAME);
+  if (!fs.existsSync(assetsDir)) fs.mkdirSync(assetsDir, { recursive: true });
   return dir;
 }
 
 // List all projects
 app.get('/api/projects', (req, res) => {
-  const metaPath = path.join(PROJECTS_DIR, '_projects.json');
-  if (!fs.existsSync(metaPath)) return res.json([]);
-  const projects = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+  const projects = loadProjectsMeta();
   projects.sort((a, b) => new Date(b.last_accessed_at || b.created_at) - new Date(a.last_accessed_at || a.created_at));
   res.json(projects);
 });
 
 // Create project
 app.post('/api/projects', (req, res) => {
-  const { name } = req.body;
-  if (!name || !name.trim()) {
-    return res.status(400).json({ error: 'Project name is required' });
-  }
-  const trimmedName = name.trim();
-  const metaPath = path.join(PROJECTS_DIR, '_projects.json');
-  const projects = fs.existsSync(metaPath) ? JSON.parse(fs.readFileSync(metaPath, 'utf-8')) : [];
+  try {
+    const name = validateProjectName(req.body?.name);
+    const projects = loadProjectsMeta();
 
-  if (projects.some(p => p.name === trimmedName)) {
-    return res.status(409).json({ error: 'A project with this name already exists' });
-  }
+    if (projects.some((project) => project.name === name)) {
+      return res.status(409).json({ error: 'A project with this name already exists' });
+    }
 
-  const project = {
-    id: trimmedName,
-    name: trimmedName,
-    created_at: new Date().toISOString(),
-    last_accessed_at: new Date().toISOString(),
-  };
-  projects.push(project);
-  fs.writeFileSync(metaPath, JSON.stringify(projects, null, 2));
-  ensureProjectDir(trimmedName);
-  res.json(project);
+    const project = {
+      id: createProjectId(name, new Set(projects.map((existing) => existing.id))),
+      name,
+      created_at: new Date().toISOString(),
+      last_accessed_at: new Date().toISOString(),
+    };
+
+    projects.push(project);
+    saveProjectsMeta(projects);
+    ensureProjectDir(project.id);
+    res.json(project);
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Failed to create project' });
+  }
 });
 
 // Update project access time
 app.patch('/api/projects/:id', (req, res) => {
-  const metaPath = path.join(PROJECTS_DIR, '_projects.json');
-  if (!fs.existsSync(metaPath)) return res.status(404).json({ error: 'Not found' });
-  const projects = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
-  const idx = projects.findIndex(p => p.id === req.params.id);
-  if (idx < 0) return res.status(404).json({ error: 'Not found' });
-  projects[idx] = { ...projects[idx], ...req.body, id: req.params.id };
-  fs.writeFileSync(metaPath, JSON.stringify(projects, null, 2));
-  res.json(projects[idx]);
+  try {
+    const projectId = assertSafeProjectId(req.params.id);
+    const projects = loadProjectsMeta();
+    const idx = projects.findIndex((project) => project.id === projectId);
+    if (idx < 0) {
+      return res.status(404).json({ error: 'Project not found' });
+    }
+
+    const nextProject = { ...projects[idx] };
+
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'name')) {
+      const nextName = validateProjectName(req.body.name);
+      if (projects.some((project) => project.id !== projectId && project.name === nextName)) {
+        return res.status(409).json({ error: 'A project with this name already exists' });
+      }
+      nextProject.name = nextName;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'last_accessed_at')) {
+      const timestamp = typeof req.body.last_accessed_at === 'string' ? req.body.last_accessed_at : '';
+      if (!timestamp || Number.isNaN(Date.parse(timestamp))) {
+        return res.status(400).json({ error: 'Invalid last_accessed_at value' });
+      }
+      nextProject.last_accessed_at = timestamp;
+    }
+
+    projects[idx] = nextProject;
+    saveProjectsMeta(projects);
+    res.json(nextProject);
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Failed to update project' });
+  }
 });
 
 // Delete project
 app.delete('/api/projects/:id', (req, res) => {
-  const metaPath = path.join(PROJECTS_DIR, '_projects.json');
-  if (fs.existsSync(metaPath)) {
-    const projects = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
-    const remaining = projects.filter(p => p.id !== req.params.id);
-    fs.writeFileSync(metaPath, JSON.stringify(remaining, null, 2));
+  try {
+    const projectId = assertSafeProjectId(req.params.id);
+    const remaining = loadProjectsMeta().filter((project) => project.id !== projectId);
+    saveProjectsMeta(remaining);
+    const dir = getProjectDir(projectId);
+    if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Failed to delete project' });
   }
-  const dir = getProjectDir(req.params.id);
-  if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
-  res.json({ success: true });
 });
 
 // Slide info
 app.get('/api/projects/:id/info', (req, res) => {
-  const infoPath = path.join(getProjectDir(req.params.id), 'info.json');
-  if (!fs.existsSync(infoPath)) return res.json(null);
-  res.json(JSON.parse(fs.readFileSync(infoPath, 'utf-8')));
+  try {
+    requireProject(req.params.id);
+    const infoPath = path.join(getProjectDir(req.params.id), 'info.json');
+    if (!fs.existsSync(infoPath)) return res.json(null);
+    res.json(readJsonFile(infoPath, null));
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Failed to load project info' });
+  }
 });
 
 app.put('/api/projects/:id/info', (req, res) => {
-  ensureProjectDir(req.params.id);
-  const infoPath = path.join(getProjectDir(req.params.id), 'info.json');
-  fs.writeFileSync(infoPath, JSON.stringify(req.body, null, 2));
-  res.json({ success: true });
+  try {
+    requireProject(req.params.id);
+    ensureProjectDir(req.params.id);
+    const infoPath = path.join(getProjectDir(req.params.id), 'info.json');
+    writeJsonFile(infoPath, req.body || null);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Failed to save project info' });
+  }
 });
 
 // States
 app.post('/api/projects/:id/states', (req, res) => {
-  const { stateId, html, chat, context } = req.body;
-  ensureProjectDir(req.params.id);
-  const statePath = path.join(getProjectDir(req.params.id), 'states', `${stateId}.json`);
-  fs.writeFileSync(statePath, JSON.stringify({ html, chat, context: context || null }, null, 2));
-  res.json({ path: statePath });
+  try {
+    requireProject(req.params.id);
+    const stateId = validateStateId(req.body?.stateId);
+    const html = typeof req.body?.html === 'string' ? req.body.html : '';
+    const chat = Array.isArray(req.body?.chat) ? req.body.chat : [];
+    const context = req.body?.context || null;
+    ensureProjectDir(req.params.id);
+    const statePath = path.join(getProjectDir(req.params.id), 'states', `${stateId}.json`);
+    writeJsonFile(statePath, { html, chat, context });
+    res.json({ path: statePath, stateId });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Failed to save state' });
+  }
 });
 
 app.get('/api/projects/:id/states/:stateId', (req, res) => {
-  const statePath = path.join(getProjectDir(req.params.id), 'states', `${req.params.stateId}.json`);
-  if (!fs.existsSync(statePath)) return res.status(404).json({ error: 'State not found' });
-  res.json(JSON.parse(fs.readFileSync(statePath, 'utf-8')));
+  try {
+    requireProject(req.params.id);
+    const stateId = validateStateId(req.params.stateId);
+    const statePath = path.join(getProjectDir(req.params.id), 'states', `${stateId}.json`);
+    if (!fs.existsSync(statePath)) return res.status(404).json({ error: 'State not found' });
+    res.json(readJsonFile(statePath, null));
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Failed to load state' });
+  }
 });
 
 app.delete('/api/projects/:id/states/:stateId', (req, res) => {
-  const statePath = path.join(getProjectDir(req.params.id), 'states', `${req.params.stateId}.json`);
-  if (fs.existsSync(statePath)) fs.unlinkSync(statePath);
-  res.json({ success: true });
+  try {
+    requireProject(req.params.id);
+    const stateId = validateStateId(req.params.stateId);
+    const statePath = path.join(getProjectDir(req.params.id), 'states', `${stateId}.json`);
+    if (fs.existsSync(statePath)) fs.unlinkSync(statePath);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Failed to delete state' });
+  }
 });
 
 // Files
 app.get('/api/projects/:id/files', (req, res) => {
-  const filesPath = path.join(getProjectDir(req.params.id), 'files.json');
-  if (!fs.existsSync(filesPath)) return res.json([]);
-  res.json(JSON.parse(fs.readFileSync(filesPath, 'utf-8')));
+  try {
+    requireProject(req.params.id);
+    const files = loadStoredProjectFiles(req.params.id).map((file) => buildPublicFileRecord(req.params.id, file));
+    res.json(files);
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Failed to load files' });
+  }
 });
 
-app.put('/api/projects/:id/files', (req, res) => {
-  ensureProjectDir(req.params.id);
-  const filesPath = path.join(getProjectDir(req.params.id), 'files.json');
-  fs.writeFileSync(filesPath, JSON.stringify(req.body, null, 2));
-  res.json({ success: true });
+app.post('/api/projects/:id/files', (req, res) => {
+  try {
+    requireProject(req.params.id);
+    ensureProjectDir(req.params.id);
+    const files = upsertProjectFiles(req.params.id, req.body?.files || []).map((file) => buildPublicFileRecord(req.params.id, file));
+    res.json(files);
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Failed to save files' });
+  }
+});
+
+app.delete('/api/projects/:id/files/:filename', (req, res) => {
+  try {
+    requireProject(req.params.id);
+    deleteStoredProjectFile(req.params.id, req.params.filename);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Failed to delete file' });
+  }
 });
 
 // Serve individual file by name (images/PDFs for use in slides)
 app.get('/api/projects/:id/file/:filename', (req, res) => {
-  const filesPath = path.join(getProjectDir(req.params.id), 'files.json');
-  if (!fs.existsSync(filesPath)) return res.status(404).json({ error: 'Not found' });
+  try {
+    requireProject(req.params.id);
+    const files = loadStoredProjectFiles(req.params.id);
+    const file = files.find((entry) => entry.name === req.params.filename);
+    if (!file) return res.status(404).json({ error: 'File not found' });
 
-  const files = JSON.parse(fs.readFileSync(filesPath, 'utf-8'));
-  const file = files.find(f => f.name === req.params.filename);
-  if (!file) return res.status(404).json({ error: 'File not found' });
+    const mimeType = file.mimeType;
+    const buffer = fs.readFileSync(getProjectAssetPath(req.params.id, file.assetPath));
 
-  // dataUrl format: "data:<mimeType>;base64,<data>"
-  const match = file.dataUrl.match(/^data:([^;]+);base64,(.+)$/);
-  if (!match) return res.status(500).json({ error: 'Invalid file data' });
-
-  const mimeType = match[1];
-  const buffer = Buffer.from(match[2], 'base64');
-
-  res.setHeader('Content-Type', mimeType);
-  res.setHeader('Content-Length', buffer.length);
-  res.setHeader('Cache-Control', 'public, max-age=86400');
-  res.send(buffer);
+    res.setHeader('Content-Type', mimeType);
+    res.setHeader('Content-Length', buffer.length);
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.send(buffer);
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Failed to load file' });
+  }
 });
 
 // ============================================================
 // Settings (persisted to settings.json)
 // ============================================================
 
-const SETTINGS_PATH = path.join(__dirname, 'settings.json');
-const PRICING_PATH = path.join(__dirname, 'pricing.json');
-
 app.get('/api/settings', (req, res) => {
-  if (!fs.existsSync(SETTINGS_PATH)) return res.json({});
-  res.json(JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf-8')));
+  const settings = loadSettings();
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({
+    provider: settings.provider,
+    model: settings.model,
+    baseUrl: settings.baseUrl,
+    hasApiKey: Boolean(settings.apiKey),
+  });
 });
 
 app.put('/api/settings', (req, res) => {
-  fs.writeFileSync(SETTINGS_PATH, JSON.stringify(req.body, null, 2));
-  res.json({ success: true });
+  try {
+    const existing = loadSettings();
+    const provider = typeof req.body?.provider === 'string' ? req.body.provider : existing.provider;
+    if (!SUPPORTED_PROVIDERS.has(provider)) {
+      return res.status(400).json({ error: 'Unsupported provider' });
+    }
+
+    const nextSettings = {
+      provider,
+      model: typeof req.body?.model === 'string' ? req.body.model.trim() : existing.model,
+      baseUrl: typeof req.body?.baseUrl === 'string' ? req.body.baseUrl.trim() : existing.baseUrl,
+      apiKey: existing.apiKey,
+    };
+
+    if (typeof req.body?.apiKey === 'string') {
+      const trimmedKey = req.body.apiKey.trim();
+      if (trimmedKey) {
+        nextSettings.apiKey = trimmedKey;
+      }
+    }
+    if (req.body?.clearApiKey === true) {
+      nextSettings.apiKey = '';
+    }
+
+    writeJsonFile(SETTINGS_PATH, nextSettings);
+    res.json({ success: true, hasApiKey: Boolean(nextSettings.apiKey) });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Failed to save settings' });
+  }
 });
 
 // Pricing
 app.get('/api/pricing', (req, res) => {
   if (!fs.existsSync(PRICING_PATH)) return res.json({ models: {}, custom: {} });
-  res.json(JSON.parse(fs.readFileSync(PRICING_PATH, 'utf-8')));
+  res.json(readJsonFile(PRICING_PATH, { models: {}, custom: {} }));
 });
 
 app.put('/api/pricing/custom', (req, res) => {
   const { model, input, cached, output } = req.body;
   if (!model) return res.status(400).json({ error: 'Model name is required' });
   const pricing = fs.existsSync(PRICING_PATH)
-    ? JSON.parse(fs.readFileSync(PRICING_PATH, 'utf-8'))
+    ? readJsonFile(PRICING_PATH, { models: {}, custom: {} })
     : { models: {}, custom: {} };
   if (!pricing.custom) pricing.custom = {};
   pricing.custom[model] = { input: Number(input), cached: Number(cached), output: Number(output) };
-  fs.writeFileSync(PRICING_PATH, JSON.stringify(pricing, null, 2));
+  writeJsonFile(PRICING_PATH, pricing);
   res.json({ success: true });
 });
 
@@ -1080,6 +1586,7 @@ app.put('/api/pricing/custom', (req, res) => {
 // ============================================================
 
 const distPath = path.join(__dirname, 'dist');
+migrateLegacyProjects();
 if (fs.existsSync(distPath)) {
   app.use(express.static(distPath));
   app.get('/{*path}', (req, res) => {

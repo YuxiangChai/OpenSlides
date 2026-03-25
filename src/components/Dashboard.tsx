@@ -3,6 +3,7 @@ import { Plus, Upload, Folder, Calendar, ArrowRight, Layout, Trash2, CheckCircle
 
 import { useLanguage } from "../hooks/useLanguage";
 import { Project } from "@/types";
+import { fetchJson, fetchOk } from "@/lib/http";
 
 interface DashboardProps {
   onSelectProject: (project: Project) => void;
@@ -19,8 +20,7 @@ export default function Dashboard({ onSelectProject }: DashboardProps) {
 
   const fetchProjects = async () => {
     try {
-      const res = await fetch('/api/projects');
-      const data = await res.json();
+      const data = await fetchJson<Project[]>('/api/projects', undefined, 'Failed to fetch projects');
       setProjects(data);
     } catch (error) {
       console.error('Failed to fetch projects:', error);
@@ -44,16 +44,11 @@ export default function Dashboard({ onSelectProject }: DashboardProps) {
     }
 
     try {
-      const res = await fetch('/api/projects', {
+      await fetchOk('/api/projects', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: name, name }),
-      });
-      if (!res.ok) {
-        const data = await res.json();
-        alert(data.error || 'Failed to create project');
-        return;
-      }
+        body: JSON.stringify({ name }),
+      }, 'Failed to create project');
       setNewProjectName("");
       fetchProjects();
     } catch (error) {
@@ -82,19 +77,14 @@ export default function Dashboard({ onSelectProject }: DashboardProps) {
 
     try {
       // 1. Create the project
-      const res = await fetch('/api/projects', {
+      const createdProject = await fetchJson<Project>('/api/projects', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: finalName, name: finalName }),
-      });
-      if (!res.ok) {
-        const data = await res.json();
-        alert(data.error || 'Failed to create project');
-        return;
-      }
+        body: JSON.stringify({ name: finalName }),
+      }, 'Failed to create project');
 
       // 2. Save the HTML as the initial state
-      await fetch(`/api/projects/${encodeURIComponent(finalName)}/states`, {
+      await fetchOk(`/api/projects/${encodeURIComponent(createdProject.id)}/states`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -103,10 +93,10 @@ export default function Dashboard({ onSelectProject }: DashboardProps) {
           chat: [],
           context: null,
         }),
-      });
+      }, 'Failed to import HTML state');
 
       // 3. Save slide info pointing to this state
-      await fetch(`/api/projects/${encodeURIComponent(finalName)}/info`, {
+      await fetchOk(`/api/projects/${encodeURIComponent(createdProject.id)}/info`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -121,7 +111,7 @@ export default function Dashboard({ onSelectProject }: DashboardProps) {
           auto_states: [],
           current_state: 'state_1',
         }),
-      });
+      }, 'Failed to save imported project info');
 
       fetchProjects();
     } catch (error) {
@@ -134,11 +124,11 @@ export default function Dashboard({ onSelectProject }: DashboardProps) {
 
     // Update last_accessed_at
     try {
-      await fetch(`/api/projects/${project.id}`, {
+      await fetchOk(`/api/projects/${encodeURIComponent(project.id)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ last_accessed_at: new Date().toISOString() }),
-      });
+      }, 'Failed to update access time');
     } catch (error) {
       console.error('Failed to update access time:', error);
     }
@@ -163,7 +153,7 @@ export default function Dashboard({ onSelectProject }: DashboardProps) {
 
     try {
       await Promise.all(
-        projectIds.map(id => fetch(`/api/projects/${id}`, { method: 'DELETE' }))
+        projectIds.map((id) => fetchOk(`/api/projects/${encodeURIComponent(id)}`, { method: 'DELETE' }, 'Failed to delete project'))
       );
       setSelectedProjects(new Set());
       fetchProjects();

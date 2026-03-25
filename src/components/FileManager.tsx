@@ -9,10 +9,16 @@ import {
 } from "lucide-react";
 import { useLanguage } from "../hooks/useLanguage";
 import { LocalFile } from "@/types";
+import { fetchJson, fetchOk } from "@/lib/http";
 
 interface FileManagerProps {
   projectId: string;
   onFilesChange: (files: LocalFile[]) => void;
+}
+
+interface PendingUploadItem {
+  file: File;
+  name: string;
 }
 
 export default function FileManager({ projectId, onFilesChange }: FileManagerProps) {
@@ -27,32 +33,15 @@ export default function FileManager({ projectId, onFilesChange }: FileManagerPro
   useEffect(() => {
     const loadFiles = async () => {
       try {
-        const res = await fetch(`/api/projects/${projectId}/files`);
-        if (res.ok) {
-          const parsed: LocalFile[] = await res.json();
-          setFiles(parsed);
-          onFilesChange(parsed);
-        }
+        const parsed = await fetchJson<LocalFile[]>(`/api/projects/${encodeURIComponent(projectId)}/files`, undefined, 'Failed to load files');
+        setFiles(parsed);
+        onFilesChange(parsed);
       } catch (error) {
         console.error('Failed to load files:', error);
       }
     };
     loadFiles();
-  }, [projectId]);
-
-  const saveFiles = async (updatedFiles: LocalFile[]) => {
-    setFiles(updatedFiles);
-    onFilesChange(updatedFiles);
-    try {
-      await fetch(`/api/projects/${projectId}/files`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updatedFiles),
-      });
-    } catch (error) {
-      console.error('Failed to save files:', error);
-    }
-  };
+  }, [projectId, onFilesChange]);
 
   const ALLOWED_EXTENSIONS = [
     "png", "jpeg", "jpg", "svg", "pdf",
@@ -84,35 +73,66 @@ export default function FileManager({ projectId, onFilesChange }: FileManagerPro
       setPendingUploadFiles(validFiles);
       setShowOverwriteConfirm(true);
     } else {
-      processUpload(validFiles);
+      void processUpload(validFiles.map((file) => ({ file, name: file.name }))).catch((error) => {
+        console.error('Failed to upload files:', error);
+        alert(error instanceof Error ? error.message : 'Failed to save files');
+      });
     }
   };
 
-  const processUpload = async (filesToUpload: File[]) => {
-    const newFiles: LocalFile[] = [];
+  const buildRenamedUploadItems = (filesToUpload: File[]): PendingUploadItem[] => {
+    const usedNames = new Set(files.map((file) => file.name));
+    const uploadItems: PendingUploadItem[] = [];
+
+    const getUniqueName = (originalName: string): string => {
+      const extensionIndex = originalName.lastIndexOf(".");
+      const hasExtension = extensionIndex > 0;
+      const baseName = hasExtension ? originalName.slice(0, extensionIndex) : originalName;
+      const extension = hasExtension ? originalName.slice(extensionIndex) : "";
+
+      let candidate = originalName;
+      let suffix = 2;
+      while (usedNames.has(candidate)) {
+        candidate = `${baseName} (${suffix})${extension}`;
+        suffix += 1;
+      }
+      return candidate;
+    };
 
     for (const file of filesToUpload) {
-      const dataUrl = await readFileAsDataUrl(file);
-      newFiles.push({
+      const nextName = getUniqueName(file.name);
+      usedNames.add(nextName);
+      uploadItems.push({ file, name: nextName });
+    }
+
+    return uploadItems;
+  };
+
+  const processUpload = async (filesToUpload: PendingUploadItem[]) => {
+    const uploadPayload: Array<{ name: string; dataUrl: string; mimeType: string; size: number }> = [];
+
+    for (const file of filesToUpload) {
+      const dataUrl = await readFileAsDataUrl(file.file);
+      uploadPayload.push({
         name: file.name,
         dataUrl,
-        mimeType: file.type || 'application/octet-stream',
-        size: file.size,
+        mimeType: file.file.type || 'application/octet-stream',
+        size: file.file.size,
       });
     }
 
-    // Merge with existing (overwrite duplicates)
-    const merged = [...files];
-    for (const newFile of newFiles) {
-      const existingIdx = merged.findIndex(f => f.name === newFile.name);
-      if (existingIdx >= 0) {
-        merged[existingIdx] = newFile;
-      } else {
-        merged.push(newFile);
-      }
-    }
+    const nextFiles = await fetchJson<LocalFile[]>(
+      `/api/projects/${encodeURIComponent(projectId)}/files`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ files: uploadPayload }),
+      },
+      'Failed to save files'
+    );
 
-    saveFiles(merged);
+    setFiles(nextFiles);
+    onFilesChange(nextFiles);
   };
 
   const readFileAsDataUrl = (file: File): Promise<string> => {
@@ -124,9 +144,22 @@ export default function FileManager({ projectId, onFilesChange }: FileManagerPro
     });
   };
 
-  const confirmUpload = () => {
+  const confirmOverwriteUpload = () => {
     setShowOverwriteConfirm(false);
-    processUpload(pendingUploadFiles);
+    void processUpload(pendingUploadFiles.map((file) => ({ file, name: file.name }))).catch((error) => {
+      console.error('Failed to upload files:', error);
+      alert(error instanceof Error ? error.message : 'Failed to save files');
+    });
+    setPendingUploadFiles([]);
+    setDuplicateFiles([]);
+  };
+
+  const confirmRenameUpload = () => {
+    setShowOverwriteConfirm(false);
+    void processUpload(buildRenamedUploadItems(pendingUploadFiles)).catch((error) => {
+      console.error('Failed to upload files:', error);
+      alert(error instanceof Error ? error.message : 'Failed to save files');
+    });
     setPendingUploadFiles([]);
     setDuplicateFiles([]);
   };
@@ -139,8 +172,21 @@ export default function FileManager({ projectId, onFilesChange }: FileManagerPro
 
   const confirmDelete = () => {
     if (!deleteTarget) return;
-    const updated = files.filter(f => f.name !== deleteTarget);
-    saveFiles(updated);
+    void (async () => {
+      try {
+        await fetchOk(
+          `/api/projects/${encodeURIComponent(projectId)}/files/${encodeURIComponent(deleteTarget)}`,
+          { method: 'DELETE' },
+          'Failed to delete file'
+        );
+        const updated = files.filter((file) => file.name !== deleteTarget);
+        setFiles(updated);
+        onFilesChange(updated);
+      } catch (error) {
+        console.error('Failed to delete file:', error);
+        alert(error instanceof Error ? error.message : 'Failed to delete file');
+      }
+    })();
     setDeleteTarget(null);
   };
 
@@ -152,14 +198,7 @@ export default function FileManager({ projectId, onFilesChange }: FileManagerPro
   const openFile = (fileName: string) => {
     const file = files.find(f => f.name === fileName);
     if (file) {
-      const win = window.open();
-      if (win) {
-        if (file.mimeType.startsWith('image/')) {
-          win.document.write(`<img src="${file.dataUrl}" style="max-width:100%;"/>`);
-        } else {
-          win.document.write(`<iframe src="${file.dataUrl}" style="width:100%;height:100%;border:none;"></iframe>`);
-        }
-      }
+      window.open(file.url, '_blank', 'noopener,noreferrer');
     }
   };
 
@@ -280,10 +319,16 @@ export default function FileManager({ projectId, onFilesChange }: FileManagerPro
                 {t('common.cancel')}
               </button>
               <button
-                onClick={confirmUpload}
+                onClick={confirmRenameUpload}
+                className="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-medium transition-colors"
+              >
+                {t('fileManager.keepBoth')}
+              </button>
+              <button
+                onClick={confirmOverwriteUpload}
                 className="flex-1 px-4 py-2 bg-yellow-600 hover:bg-yellow-500 text-white rounded-xl font-medium transition-colors"
               >
-                {t('common.confirm')}
+                {t('fileManager.overwrite')}
               </button>
             </div>
           </div>

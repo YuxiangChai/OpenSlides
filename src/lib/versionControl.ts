@@ -1,8 +1,9 @@
 import { SlideInfo, VersionState, LoadedContent, ChatMessage, ConversationContext } from '@/types';
+import { fetchJson, fetchOk } from '@/lib/http';
 
 export const getSlideInfo = async (projectId: string): Promise<SlideInfo | null> => {
   try {
-    const res = await fetch(`/api/projects/${projectId}/info`);
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/info`);
     if (!res.ok) return null;
     return await res.json();
   } catch (error) {
@@ -12,11 +13,11 @@ export const getSlideInfo = async (projectId: string): Promise<SlideInfo | null>
 };
 
 export const saveSlideInfo = async (projectId: string, info: SlideInfo): Promise<void> => {
-  await fetch(`/api/projects/${projectId}/info`, {
+  await fetchOk(`/api/projects/${encodeURIComponent(projectId)}/info`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(info),
-  });
+  }, 'Failed to save project info');
 };
 
 export const saveState = async (
@@ -29,7 +30,7 @@ export const saveState = async (
 ): Promise<VersionState> => {
   const stateId = `${isAuto ? 'auto' : 'state'}_${stateIndex}`;
 
-  await fetch(`/api/projects/${projectId}/states`, {
+  await fetchOk(`/api/projects/${encodeURIComponent(projectId)}/states`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -38,7 +39,7 @@ export const saveState = async (
       chat: chatHistory || [],
       context: context || null,
     }),
-  });
+  }, 'Failed to save state');
 
   return {
     id: stateId,
@@ -51,13 +52,15 @@ export const saveState = async (
 };
 
 export const deleteState = async (projectId: string, stateId: string): Promise<void> => {
-  await fetch(`/api/projects/${projectId}/states/${stateId}`, { method: 'DELETE' });
+  await fetchOk(`/api/projects/${encodeURIComponent(projectId)}/states/${encodeURIComponent(stateId)}`, { method: 'DELETE' }, 'Failed to delete state');
 };
 
 export const loadStateContent = async (projectId: string, stateId: string): Promise<LoadedContent> => {
-  const res = await fetch(`/api/projects/${projectId}/states/${stateId}`);
-  if (!res.ok) throw new Error(`State not found: ${stateId}`);
-  const data = await res.json();
+  const data = await fetchJson<any>(
+    `/api/projects/${encodeURIComponent(projectId)}/states/${encodeURIComponent(stateId)}`,
+    undefined,
+    `State not found: ${stateId}`
+  );
   return {
     html: data.html || '',
     chat: data.chat || [],
@@ -66,5 +69,5 @@ export const loadStateContent = async (projectId: string, stateId: string): Prom
 };
 
 export const deleteProjectData = async (projectId: string): Promise<void> => {
-  await fetch(`/api/projects/${projectId}`, { method: 'DELETE' });
+  await fetchOk(`/api/projects/${encodeURIComponent(projectId)}`, { method: 'DELETE' }, 'Failed to delete project');
 };

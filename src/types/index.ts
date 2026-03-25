@@ -9,6 +9,7 @@ export interface AIConfig {
   apiKey: string;
   model: string;
   baseUrl: string;
+  hasStoredApiKey: boolean;
 }
 
 export interface Project {
@@ -104,9 +105,10 @@ export interface StorageFile {
 
 export interface LocalFile {
   name: string;
-  dataUrl: string;
   mimeType: string;
   size: number;
+  url: string;
+  created_at?: string;
 }
 
 // ============================================================
