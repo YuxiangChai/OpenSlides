@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { X, Check, AlertCircle, Eye, EyeOff, Globe, DollarSign, Cpu, Key, CircleDot, Info } from "lucide-react";
+import { X, Check, AlertCircle, Eye, EyeOff, Globe, DollarSign, Cpu, Key, CircleDot, Info, Search } from "lucide-react";
 import { useLanguage } from "../hooks/useLanguage";
 import { AIProvider } from "@/types";
 import { lookupPricing } from "@/lib/ai";
@@ -91,9 +91,11 @@ type ProviderConfigs = Record<string, { apiKey: string; model: string; baseUrl: 
 
 export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
   const [activeProvider, setActiveProvider] = useState<AIProvider>('gemini');
-  const [selectedProvider, setSelectedProvider] = useState<AIProvider>('gemini');
+  const [selectedTab, setSelectedTab] = useState<AIProvider | 'search'>('gemini');
   const [providerConfigs, setProviderConfigs] = useState<ProviderConfigs>({});
   const [showApiKey, setShowApiKey] = useState(false);
+  const [tavilyApiKey, setTavilyApiKey] = useState('');
+  const [showTavilyKey, setShowTavilyKey] = useState(false);
   const [priceInput, setPriceInput] = useState("");
   const [priceCached, setPriceCached] = useState("");
   const [priceOutput, setPriceOutput] = useState("");
@@ -109,13 +111,15 @@ export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
         .then(data => {
           const active = data.activeProvider || 'gemini';
           setActiveProvider(active);
-          setSelectedProvider(active);
+          setSelectedTab(active);
           setProviderConfigs(data.providers || {});
+          setTavilyApiKey(data.tavilyApiKey || '');
         })
         .catch(() => {
           setActiveProvider('gemini');
-          setSelectedProvider('gemini');
+          setSelectedTab('gemini');
           setProviderConfigs({});
+          setTavilyApiKey('');
         });
       fetchJson<any>('/api/pricing', undefined, 'Failed to load pricing')
         .then(data => setPricingData(data))
@@ -123,6 +127,7 @@ export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     }
   }, [isOpen]);
 
+  const selectedProvider = selectedTab !== 'search' ? selectedTab : activeProvider;
   const providerOpt = PROVIDER_OPTIONS.find(p => p.value === selectedProvider) || PROVIDER_OPTIONS[0];
   const currentCfg = providerConfigs[selectedProvider] || { apiKey: '', model: '', baseUrl: '' };
 
@@ -157,9 +162,10 @@ export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     }));
   };
 
-  const handleProviderSelect = (p: AIProvider) => {
-    setSelectedProvider(p);
+  const handleTabSelect = (tab: AIProvider | 'search') => {
+    setSelectedTab(tab);
     setShowApiKey(false);
+    setShowTavilyKey(false);
     setSaveStatus(null);
   };
 
@@ -175,6 +181,7 @@ export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
           apiKey: cfg.apiKey,
           model: cfg.model,
           baseUrl: cfg.baseUrl,
+          tavilyApiKey,
         }),
       }, 'Failed to save settings');
 
@@ -229,9 +236,9 @@ export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
               return (
                 <button
                   key={opt.value}
-                  onClick={() => handleProviderSelect(opt.value)}
+                  onClick={() => handleTabSelect(opt.value)}
                   className={`w-full text-left px-4 py-2.5 text-sm transition-colors flex items-center justify-between gap-2 ${
-                    selectedProvider === opt.value
+                    selectedTab === opt.value
                       ? 'bg-blue-600/15 text-blue-400 border-r-2 border-blue-500'
                       : 'text-gray-400 hover:bg-white/5 hover:text-gray-200'
                   }`}
@@ -243,11 +250,75 @@ export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                 </button>
               );
             })}
+            <div className="border-t border-[#2e2e30] my-2" />
+            <button
+              onClick={() => handleTabSelect('search')}
+              className={`w-full text-left px-4 py-2.5 text-sm transition-colors flex items-center justify-between gap-2 ${
+                selectedTab === 'search'
+                  ? 'bg-blue-600/15 text-blue-400 border-r-2 border-blue-500'
+                  : 'text-gray-400 hover:bg-white/5 hover:text-gray-200'
+              }`}
+            >
+              <span className="flex items-center gap-2 truncate"><Search size={14} /> {isZh ? '搜索' : 'Search'}</span>
+              {Boolean(tavilyApiKey) && (
+                <CircleDot size={10} className="text-green-500 shrink-0" />
+              )}
+            </button>
           </div>
 
           {/* Right: Detail panel */}
           <div className="flex-1 overflow-y-auto custom-scrollbar p-5 space-y-5">
 
+            {selectedTab === 'search' ? (
+            <>
+            {/* Search config */}
+            <div>
+              <h3 className="text-base font-semibold text-white">{isZh ? '搜索代理' : 'Search Agent'}</h3>
+              <p className="text-xs text-gray-500 mt-1">
+                {isZh
+                  ? '配置后，AI 会自动搜索网络获取最新信息来生成更准确的幻灯片'
+                  : 'When configured, AI will automatically search the web for up-to-date info to create more accurate slides'}
+              </p>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="block text-sm text-gray-300 flex items-center gap-2">
+                <Key size={14} /> Tavily API Key
+              </label>
+              <div className="relative">
+                <input
+                  type={showTavilyKey ? "text" : "password"}
+                  value={tavilyApiKey}
+                  onChange={e => setTavilyApiKey(e.target.value)}
+                  placeholder="tvly-..."
+                  className="w-full bg-black/30 border border-[#2e2e30] rounded-lg px-4 py-2 text-white focus:outline-none focus:border-blue-500 transition-colors pr-10 text-sm"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowTavilyKey(!showTavilyKey)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-white transition-colors"
+                >
+                  {showTavilyKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
+              {Boolean(tavilyApiKey) && (
+                <p className="text-xs text-green-500/70">{isZh ? '已配置' : 'Configured'}</p>
+              )}
+              <p className="text-xs text-gray-500 mt-1">
+                {isZh ? '获取 API Key: tavily.com' : 'Get an API key at tavily.com'}
+              </p>
+            </div>
+
+            <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-lg p-3">
+              <p className="text-xs text-emerald-300/80 leading-relaxed">
+                {isZh
+                  ? '搜索代理会在生成幻灯片前自动决定是否需要联网搜索。搜索结果会保存在项目中，后续编辑时可以复用。'
+                  : 'The search agent automatically decides whether to search the web before generating slides. Results are saved per project and reused during subsequent edits.'}
+              </p>
+            </div>
+            </>
+            ) : (
+            <>
             {/* Provider header */}
             <div>
               <div className="flex items-center gap-2">
@@ -381,6 +452,8 @@ export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                   {isZh ? providerOpt.cachingInfoZh : providerOpt.cachingInfo}
                 </p>
               </div>
+            )}
+            </>
             )}
 
             {/* Save Button */}

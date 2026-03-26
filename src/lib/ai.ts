@@ -1,4 +1,4 @@
-import { AIProvider, AIConfig, ChatMessage, GenerateSlidesResponse, LocalFile } from '@/types';
+import { AIProvider, AIConfig, ChatMessage, GenerateSlidesResponse, LocalFile, SearchPlanResult, SearchResult, SearchResultItem } from '@/types';
 
 const SYSTEM_INSTRUCTION = `
 You are a world-class presentation designer using reveal.js. Create stunning, complete HTML presentations.
@@ -54,6 +54,8 @@ Structure:
   <link href="https://fonts.googleapis.com/css2?family=...&display=swap" rel="stylesheet">
   <!-- Font Awesome 6 for icons -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <!-- Chart.js for data visualization -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"><\/script>
   <style>
     /* === ALL CSS HERE === */
   </style>
@@ -151,6 +153,82 @@ EXAMPLE SLIDE:
     </div>
   </div>
 </section>
+
+═══════════════════════════════════════════
+STEP 5 — TABLES & CHARTS (DATA VISUALIZATION)
+═══════════════════════════════════════════
+
+Chart.js 4 is available via CDN (loaded in <head>). Use it for bar, line, pie, doughnut, radar, and polar area charts.
+
+CHARTS — Use <canvas> with Chart.js. Initialize charts AFTER Reveal.initialize():
+<canvas id="chartX" style="max-height: 420px; width: 100%;"></canvas>
+...
+<script>
+  Reveal.on('ready', function() {
+    new Chart(document.getElementById('chartX'), {
+      type: 'bar',
+      data: {
+        labels: ['Q1', 'Q2', 'Q3', 'Q4'],
+        datasets: [{
+          label: 'Revenue ($M)',
+          data: [12, 19, 8, 15],
+          backgroundColor: ['var(--primary-color)', ...] // use theme colors
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { labels: { color: 'var(--text-color)', font: { size: 14 } } }
+        },
+        scales: {
+          x: { ticks: { color: 'var(--muted-color)' }, grid: { color: 'rgba(255,255,255,0.1)' } },
+          y: { ticks: { color: 'var(--muted-color)' }, grid: { color: 'rgba(255,255,255,0.1)' } }
+        }
+      }
+    });
+  });
+<\/script>
+
+CHART RULES:
+- Each <canvas> must have a unique id (e.g., chart1, chart2, ...).
+- Always set max-height on the canvas (420px max for full-width, 350px in columns).
+- Use responsive: true and maintainAspectRatio: false so the chart fills its container.
+- Style chart text (labels, ticks, legend) to match the slide theme colors.
+- For dark backgrounds, set grid lines to rgba(255,255,255,0.1) and text to light colors.
+- For light backgrounds, set grid lines to rgba(0,0,0,0.1) and text to dark colors.
+- Initialize ALL charts inside a single Reveal.on('ready', ...) block placed after Reveal.initialize().
+- Keep data concise: max 8-10 data points per chart. Summarize if the source data is larger.
+- Prefer bar/line for trends, pie/doughnut for proportions, radar for multi-dimensional comparisons.
+
+TABLES — Use styled HTML <table> for structured data:
+<table style="width: 100%; border-collapse: collapse; font-size: 14pt;">
+  <thead>
+    <tr style="border-bottom: 2px solid var(--primary-color);">
+      <th style="padding: 10px 16px; text-align: left; color: var(--primary-color); font-weight: 600;">Header</th>
+      ...
+    </tr>
+  </thead>
+  <tbody>
+    <tr style="border-bottom: 1px solid rgba(255,255,255,0.1);">
+      <td style="padding: 10px 16px;">Value</td>
+      ...
+    </tr>
+  </tbody>
+</table>
+
+TABLE RULES:
+- Max 6-8 rows visible per slide. If more data, split across slides or summarize.
+- Max 4-5 columns to fit 1160px usable width.
+- Use alternating row backgrounds for readability (optional): nth-child(even) with subtle bg.
+- Highlight key cells with the primary color or bold text.
+- Always use theme colors for borders and text.
+
+WHEN TO USE WHICH:
+- Bar/Line chart: trends over time, comparisons across categories
+- Pie/Doughnut: proportions of a whole (max 6 slices)
+- Table: exact values matter, or few rows of multi-column data
+- Stat boxes: 3-4 key numbers with labels (use CSS, not Chart.js)
 
 ═══════════════════════════════════════════
 PREVENTING OVERFLOW (CRITICAL)
@@ -450,6 +528,154 @@ function buildReferenceMessage(
 }
 
 // ============================================================
+// Search Agent
+// ============================================================
+
+export const planSearch = async (
+  prompt: string,
+  providerOverride?: AIProvider,
+  projectId?: string
+): Promise<SearchPlanResult> => {
+  const config = await loadConfig(providerOverride);
+  const model = config.model || getDefaultModel(config.provider);
+  console.log('[planSearch] Started, projectId:', projectId, 'provider:', config.provider, 'model:', model);
+
+  // Include existing context topics so the planner can skip redundant searches
+  let enrichedPrompt = prompt;
+  if (projectId) {
+    try {
+      console.log('[planSearch] Loading project context...');
+      const ctx = await loadProjectContext(projectId);
+      console.log('[planSearch] Project context loaded, searchResults:', ctx.searchResults?.length || 0);
+      if (ctx.searchResults && ctx.searchResults.length > 0) {
+        const topics = ctx.searchResults.map(r => r.title).slice(0, 10).join(', ');
+        enrichedPrompt += `\n\n[Existing project context topics: ${topics}]`;
+      }
+    } catch (err) {
+      console.warn('[planSearch] loadProjectContext failed:', err);
+    }
+  }
+
+  console.log('[planSearch] Calling /api/plan with prompt length:', enrichedPrompt.length, 'provider:', providerOverride);
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 120000);
+  try {
+    const response = await fetch('/api/plan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: enrichedPrompt, provider: config.provider, model }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      console.warn('[planSearch] /api/plan returned', response.status);
+      return { needsSearch: false, needsContext: true, queries: [], reasoning: 'Plan request failed' };
+    }
+    const plan = await response.json();
+    console.log('[planSearch] Plan result:', plan);
+    return plan;
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      console.warn('[planSearch] /api/plan timed out after 120s');
+      return { needsSearch: false, needsContext: true, queries: [], reasoning: 'Plan request timed out' };
+    }
+    throw err;
+  }
+};
+
+export const executeSearch = async (queries: string[]): Promise<SearchResult> => {
+  const response = await fetch('/api/search', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ queries }),
+  });
+  if (!response.ok) {
+    return { results: [], error: 'Search request failed' };
+  }
+  return response.json();
+};
+
+export const formatSearchContext = (searchResult: SearchResult): string => {
+  if (!searchResult.results || searchResult.results.length === 0) return '';
+
+  let context = '[Web Search Results]\nThe following information was gathered from web search. Use it to create accurate, factual content:\n\n';
+
+  if (searchResult.answer) {
+    context += `Summary: ${searchResult.answer}\n\n`;
+  }
+
+  for (let i = 0; i < searchResult.results.length; i++) {
+    const r = searchResult.results[i];
+    context += `## Source ${i + 1}: ${r.title} (${r.url})\n${r.content}\n\n`;
+  }
+
+  context += '[End of Search Results]';
+  return context;
+};
+
+// ============================================================
+// Project Context Persistence
+// ============================================================
+
+interface ProjectContext {
+  searchResults: SearchResultItem[];
+  dataSummaries: Array<{ label: string; data: string }>;
+}
+
+export const saveProjectContext = async (
+  projectId: string,
+  update: { searchResults?: SearchResultItem[]; dataSummaries?: Array<{ label: string; data: string }> }
+): Promise<void> => {
+  await fetch(`/api/projects/${encodeURIComponent(projectId)}/context`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(update),
+  });
+};
+
+export const loadProjectContext = async (projectId: string): Promise<ProjectContext> => {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/context`, {
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) return { searchResults: [], dataSummaries: [] };
+    return response.json();
+  } catch {
+    clearTimeout(timeoutId);
+    return { searchResults: [], dataSummaries: [] };
+  }
+};
+
+export const loadProjectContextFormatted = async (projectId: string): Promise<string> => {
+  const ctx = await loadProjectContext(projectId);
+  const parts: string[] = [];
+
+  if (ctx.searchResults && ctx.searchResults.length > 0) {
+    parts.push('[Previously Gathered Web Research]\nThis information was collected from earlier web searches for this project:\n');
+    for (let i = 0; i < ctx.searchResults.length; i++) {
+      const r = ctx.searchResults[i];
+      parts.push(`## Source ${i + 1}: ${r.title} (${r.url})\n${r.content}\n`);
+    }
+    parts.push('[End of Web Research]\n');
+  }
+
+  if (ctx.dataSummaries && ctx.dataSummaries.length > 0) {
+    parts.push('[Data Summaries]\nProcessed data from uploaded files:\n');
+    for (const s of ctx.dataSummaries) {
+      parts.push(`## ${s.label}\n${s.data}\n`);
+    }
+    parts.push('[End of Data Summaries]\n');
+  }
+
+  return parts.join('\n');
+};
+
+// ============================================================
 // Main generation function
 // ============================================================
 
@@ -461,7 +687,8 @@ export const generateSlides = async (
   files?: LocalFile[],
   conversationSummary: string = '',
   inlineAttachments?: import("@/types").ChatAttachment[],
-  providerOverride?: AIProvider
+  providerOverride?: AIProvider,
+  searchContext?: string
 ): Promise<GenerateSlidesResponse> => {
   const config = await loadConfig(providerOverride);
   const model = config.model || getDefaultModel(config.provider);
@@ -482,6 +709,13 @@ export const generateSlides = async (
     messages.push({
       role: 'user',
       content: `[Conversation summary from earlier turns]\n${conversationSummary.trim()}`,
+    });
+  }
+
+  if (searchContext && searchContext.trim()) {
+    messages.push({
+      role: 'user',
+      content: searchContext.trim(),
     });
   }
 

@@ -169,6 +169,13 @@ export const translations = {
       proTip4Title: "Use the path that fits your workflow",
       proTip4Desc: "If you just want to share or archive the deck, opening the downloaded HTML directly is fine. If you want the most reliable presenter workflow and shortcuts, use the Present button to open the deck in its own browser tab.",
       gotIt: "Got it!",
+    },
+    cdn: {
+      title: "China CDN Mirror",
+      enabledTooltip: "China CDN: ON — Using China mirrors for faster loading",
+      disabledTooltip: "China CDN: OFF — Using global CDNs",
+      enabledInfo: "Using China-accessible mirrors (bootcdn.cn, googleapis.cn). Slides will load faster without a VPN in mainland China.",
+      disabledInfo: "Using global CDNs (jsdelivr, cloudflare, googleapis). Toggle this on if you're in China without a VPN.",
     }
   },
   zh: {
@@ -341,6 +348,13 @@ export const translations = {
       proTip4Title: "按工作流选择打开方式",
       proTip4Desc: "如果你只是想分享或归档幻灯片，直接打开下载后的 HTML 就可以。如果你更看重演讲时的稳定性和快捷键体验，建议使用 Present 在独立浏览器标签页中打开。",
       gotIt: "知道了！",
+    },
+    cdn: {
+      title: "国内 CDN 镜像",
+      enabledTooltip: "国内 CDN：已开启 — 使用国内镜像加速加载",
+      disabledTooltip: "国内 CDN：已关闭 — 使用全球 CDN",
+      enabledInfo: "正在使用国内可访问的镜像（bootcdn.cn、googleapis.cn）。在中国大陆无需 VPN 即可快速加载幻灯片。",
+      disabledInfo: "正在使用全球 CDN（jsdelivr、cloudflare、googleapis）。如果你在中国大陆且没有 VPN，请开启此选项。",
     }
   }
 } as const;

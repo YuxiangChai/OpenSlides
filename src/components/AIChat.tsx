@@ -13,6 +13,7 @@ interface AIChatProps {
   isCreatingNewChat: boolean;
   pendingMessage?: string | null;
   onPendingMessageConsumed?: () => void;
+  searchStatus?: 'idle' | 'planning' | 'searching' | 'generating';
 }
 
 const PROVIDER_LABELS: Record<AIProvider, string> = {
@@ -24,12 +25,15 @@ const PROVIDER_LABELS: Record<AIProvider, string> = {
   qwen: 'Qwen Coding',
 };
 
-export default function AIChat({ onGenerate, isGenerating, chatHistoryRef, loadedHistory, onNewChat, isCreatingNewChat, pendingMessage, onPendingMessageConsumed }: AIChatProps) {
+export default function AIChat({ onGenerate, isGenerating, chatHistoryRef, loadedHistory, onNewChat, isCreatingNewChat, pendingMessage, onPendingMessageConsumed, searchStatus = 'idle' }: AIChatProps) {
   const [message, setMessage] = useState<string>("");
   const [includeSlides, setIncludeSlides] = useState(true);
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
-  const [selectedProvider, setSelectedProvider] = useState<AIProvider | null>(null);
+  const [selectedProvider, setSelectedProvider] = useState<AIProvider | null>(() => {
+    const saved = localStorage.getItem('openslides_selected_provider');
+    return saved ? (saved as AIProvider) : null;
+  });
   const [configuredProviders, setConfiguredProviders] = useState<AIProvider[]>([]);
   const [showProviderDropdown, setShowProviderDropdown] = useState(false);
   const chatContainerRef = useRef<HTMLDivElement | null>(null);
@@ -45,6 +49,7 @@ export default function AIChat({ onGenerate, isGenerating, chatHistoryRef, loade
       const settings = getCachedSettings();
       if (settings && !selectedProvider) {
         setSelectedProvider(settings.activeProvider);
+        localStorage.setItem('openslides_selected_provider', settings.activeProvider);
       }
     });
   }, [selectedProvider]);
@@ -336,6 +341,9 @@ export default function AIChat({ onGenerate, isGenerating, chatHistoryRef, loade
                 <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
               </div>
               {isCreatingNewChat && <span className="ml-2 text-xs text-gray-400">Saving & Creating...</span>}
+              {!isCreatingNewChat && searchStatus === 'planning' && <span className="ml-2 text-xs text-gray-400">Planning search...</span>}
+              {!isCreatingNewChat && searchStatus === 'searching' && <span className="ml-2 text-xs text-emerald-400">Searching the web...</span>}
+              {!isCreatingNewChat && searchStatus === 'generating' && <span className="ml-2 text-xs text-gray-400">Generating slides...</span>}
             </div>
           </div>
         )}
@@ -443,7 +451,7 @@ export default function AIChat({ onGenerate, isGenerating, chatHistoryRef, loade
                     <button
                       key={p}
                       type="button"
-                      onClick={() => { setSelectedProvider(p); setShowProviderDropdown(false); }}
+                      onClick={() => { setSelectedProvider(p); localStorage.setItem('openslides_selected_provider', p); setShowProviderDropdown(false); }}
                       className={`w-full text-left px-3 py-1.5 text-xs transition-colors ${
                         selectedProvider === p
                           ? 'bg-blue-600/20 text-blue-400'

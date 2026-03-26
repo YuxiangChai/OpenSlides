@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from "react";
 import FileManager from "./FileManager";
 import SlidePreview from "./SlidePreview";
 import AIChat from "./AIChat";
-import { generateSlides } from "../lib/ai";
+import { generateSlides, planSearch, executeSearch, formatSearchContext, saveProjectContext, loadProjectContextFormatted } from "../lib/ai";
 import { useLanguage } from "../hooks/useLanguage";
 import { getSlideInfo, saveSlideInfo, saveState, loadStateContent, deleteState } from "../lib/versionControl";
 import { CheckCircle, AlertCircle } from "lucide-react";
@@ -136,12 +136,50 @@ export default function ProjectDetail({ project, onBack }: ProjectDetailProps) {
     return filtered;
   };
 
+  const [searchStatus, setSearchStatus] = useState<'idle' | 'planning' | 'searching' | 'generating'>('idle');
+
   const handleGenerateSlides = async (userPrompt: string = "", includeSlides: boolean = true, inlineAttachments?: import("@/types").ChatAttachment[], providerOverride?: import("@/types").AIProvider) => {
     setIsGenerating(true);
     try {
       const rawHistory = chatHistoryRef.current || [];
       const filteredHistory = filterChatHistory(rawHistory);
       const currentSlidesForApi = includeSlides ? slidesData : null;
+
+      // Planner decides: (1) whether to search the web, (2) whether to include existing context
+      let searchContext = '';
+      let persistedContext = '';
+      console.log('[handleGenerateSlides] userPrompt:', userPrompt ? `"${userPrompt.slice(0, 80)}..."` : '(empty)');
+      console.log('[handleGenerateSlides] providerOverride:', providerOverride, 'project.id:', project.id);
+      if (userPrompt) {
+        try {
+          setSearchStatus('planning');
+          console.log('[handleGenerateSlides] About to call planSearch...');
+          const plan = await planSearch(userPrompt, providerOverride, project.id);
+          console.log('[handleGenerateSlides] planSearch returned:', plan);
+
+          if (plan.needsSearch && plan.queries.length > 0) {
+            setSearchStatus('searching');
+            const searchResult = await executeSearch(plan.queries);
+            if (searchResult.results.length > 0) {
+              searchContext = formatSearchContext(searchResult);
+              // Persist search results to project context for future reuse
+              try {
+                await saveProjectContext(project.id, { searchResults: searchResult.results });
+              } catch { /* non-fatal */ }
+            }
+          }
+
+          // Load persisted context only if planner says it's needed
+          if (plan.needsContext && !searchContext) {
+            try {
+              persistedContext = await loadProjectContextFormatted(project.id);
+            } catch { /* non-fatal */ }
+          }
+        } catch (err) {
+          console.error('[handleGenerateSlides] Search agent error:', err);
+        }
+      }
+      setSearchStatus('generating');
 
       const responseData = await generateSlides(
         project.id,
@@ -151,7 +189,8 @@ export default function ProjectDetail({ project, onBack }: ProjectDetailProps) {
         uploadedFiles,
         conversationSummary,
         inlineAttachments,
-        providerOverride
+        providerOverride,
+        searchContext || persistedContext
       );
       const { content, chatText, usage } = responseData;
       setSlidesData(content);
@@ -198,6 +237,7 @@ export default function ProjectDetail({ project, onBack }: ProjectDetailProps) {
       throw error;
     } finally {
       setIsGenerating(false);
+      setSearchStatus('idle');
     }
   };
 
@@ -495,6 +535,7 @@ export default function ProjectDetail({ project, onBack }: ProjectDetailProps) {
             loadedHistory={loadedChatHistory}
             pendingMessage={pendingMessage}
             onPendingMessageConsumed={() => setPendingMessage(null)}
+            searchStatus={searchStatus}
           />
         </div>
       </div>

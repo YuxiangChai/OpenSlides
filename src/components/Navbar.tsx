@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
-import { Settings, Globe, Pencil, Check } from "lucide-react";
+import { Settings, Globe, Pencil, Check, Zap } from "lucide-react";
 import { useLanguage } from "../hooks/useLanguage";
+import { useCDN } from "../hooks/useCDN";
 import { CurrentView } from "@/types";
 import HelpModal from "./HelpModal";
 
@@ -22,6 +23,7 @@ export default function Navbar({
   onRename,
 }: NavbarProps) {
   const { toggleLanguage, t } = useLanguage();
+  const { useChinaCDN, toggleChinaCDN } = useCDN();
   const [isEditing, setIsEditing] = useState(false);
   const [editedName, setEditedName] = useState(projectName || "");
   const [showHelp, setShowHelp] = useState(false);
@@ -122,6 +124,23 @@ export default function Navbar({
             >
               <Globe size={18} />
             </button>
+            <div className="relative group">
+              <button
+                onClick={toggleChinaCDN}
+                className={`p-1.5 rounded-lg transition-colors ${
+                  useChinaCDN
+                    ? 'text-yellow-400 bg-yellow-400/10 hover:bg-yellow-400/20'
+                    : 'text-gray-400 hover:text-white hover:bg-gray-800'
+                }`}
+                title={useChinaCDN ? t('cdn.enabledTooltip') : t('cdn.disabledTooltip')}
+              >
+                <Zap size={18} />
+              </button>
+              <div className="absolute right-0 top-full mt-2 w-56 bg-gray-900 border border-gray-700 rounded-lg p-3 text-xs text-gray-300 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-opacity z-50 shadow-xl">
+                <div className="font-medium text-white mb-1">{t('cdn.title')}</div>
+                <div>{useChinaCDN ? t('cdn.enabledInfo') : t('cdn.disabledInfo')}</div>
+              </div>
+            </div>
             <button
               onClick={onSettingsClick}
               className="p-1.5 text-gray-400 hover:text-white hover:bg-gray-800 rounded-lg transition-colors"

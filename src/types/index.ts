@@ -65,6 +65,30 @@ export interface ConversationContext {
 }
 
 // ============================================================
+// Search Agent Types
+// ============================================================
+
+export interface SearchPlanResult {
+  needsSearch: boolean;
+  needsContext: boolean;
+  queries: string[];
+  reasoning: string;
+}
+
+export interface SearchResultItem {
+  title: string;
+  url: string;
+  content: string;
+  score?: number;
+}
+
+export interface SearchResult {
+  results: SearchResultItem[];
+  answer?: string;
+  error?: string;
+}
+
+// ============================================================
 // Version Control Types
 // ============================================================
 

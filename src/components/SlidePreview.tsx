@@ -2,6 +2,8 @@ import React, { KeyboardEvent, useEffect, useRef, useState } from "react";
 import { Loader2, Save, History, Clock, Pencil, Check, Trash2, X, Play, Download, Palette } from "lucide-react";
 import CodeEditor from "./CodeEditor";
 import { useLanguage } from "../hooks/useLanguage";
+import { useCDN } from "../hooks/useCDN";
+import { applyChinaCDN } from "@/lib/cdn";
 import { VersionState, ViewMode } from "@/types";
 import { injectInlineEditor } from "@/lib/injectInlineEditor";
 
@@ -763,6 +765,72 @@ const inlineExternalResources = async (html: string): Promise<string> => {
   return result;
 };
 
+// Cache for fetched CDN resources: URL → inlined replacement tag.
+// Persists across renders so external resources are only fetched once per session.
+const _resourceCache = new Map<string, string>();
+
+const inlineExternalResourcesCached = async (html: string): Promise<string> => {
+  let result = html;
+
+  // Inline CSS
+  const cssRegex = /<link\s+[^>]*rel=["']stylesheet["'][^>]*href=["'](https?:\/\/[^"']+)["'][^>]*\/?>/gi;
+  for (const match of [...html.matchAll(cssRegex)]) {
+    const fullTag = match[0];
+    const url = match[1];
+    if (_resourceCache.has(url)) {
+      result = result.replace(fullTag, _resourceCache.get(url)!);
+      continue;
+    }
+    try {
+      const resp = await fetch(url);
+      if (!resp.ok) continue;
+      let css = await resp.text();
+      // Resolve relative url() references (fonts, images)
+      const baseUrl = url.substring(0, url.lastIndexOf('/') + 1);
+      const urlRefs = [...css.matchAll(/url\(["']?(?!data:)(\.\.\/[^"')]+|(?!https?:\/\/)[^"')]+)["']?\)/g)];
+      for (const ref of urlRefs) {
+        const absUrl = new URL(ref[1], baseUrl).href;
+        try {
+          const fontResp = await fetch(absUrl);
+          if (!fontResp.ok) continue;
+          const blob = await fontResp.blob();
+          const dataUrl = await new Promise<string>((resolve) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(reader.result as string);
+            reader.readAsDataURL(blob);
+          });
+          css = css.split(ref[0]).join(`url("${dataUrl}")`);
+        } catch { /* keep original */ }
+      }
+      const replacement = `<style data-inlined-from="${url}">\n${css}\n</style>`;
+      _resourceCache.set(url, replacement);
+      result = result.replace(fullTag, replacement);
+    } catch { /* keep original */ }
+  }
+
+  // Inline JS
+  const jsRegex = /<script\s+[^>]*src=["'](https?:\/\/[^"']+)["'][^>]*><\/script>/gi;
+  for (const match of [...html.matchAll(jsRegex)]) {
+    const fullTag = match[0];
+    const url = match[1];
+    if (_resourceCache.has(url)) {
+      result = result.replace(fullTag, _resourceCache.get(url)!);
+      continue;
+    }
+    try {
+      const resp = await fetch(url);
+      if (!resp.ok) continue;
+      const js = await resp.text();
+      const encoded = btoa(unescape(encodeURIComponent(js)));
+      const replacement = `<script src="data:text/javascript;base64,${encoded}"><\/script>`;
+      _resourceCache.set(url, replacement);
+      result = result.replace(fullTag, replacement);
+    } catch { /* keep original */ }
+  }
+
+  return result;
+};
+
 const ASPECT_RATIO_STYLE = `<style data-aspect-ratio>
 html, body {
   width: 100%; height: 100%; margin: 0;
@@ -824,6 +892,7 @@ export const buildPresentationHtml = (content: string) => {
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Playfair+Display:wght@400;500;600;700&family=Space+Grotesk:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"><\/script>
   <style>
     html, body {
       width: 100%;
@@ -947,6 +1016,7 @@ export default function SlidePreview({
   const [deletingVersionId, setDeletingVersionId] = useState<string | null>(null);
   const [overflowSlides, setOverflowSlides] = useState<{index: number; title: string}[]>([]);
   const { t } = useLanguage();
+  const { useChinaCDN } = useCDN();
   const arrowColorPopoverRef = useRef<HTMLDivElement | null>(null);
   const editorFrameRef = useRef<HTMLIFrameElement | null>(null);
   const inlineEditorLabels = {
@@ -1027,6 +1097,18 @@ export default function SlidePreview({
     arrowColor
   );
   const editorFrameContent = stripArrowColor(editorPreviewContent);
+
+  // Pre-inline external CDN resources for the editor iframe so it doesn't
+  // depend on network access to CDNs (which may be slow/blocked without VPN).
+  const [inlinedEditorContent, setInlinedEditorContent] = useState<string>(editorFrameContent);
+  useEffect(() => {
+    let cancelled = false;
+    const content = useChinaCDN ? applyChinaCDN(editorFrameContent) : editorFrameContent;
+    inlineExternalResourcesCached(content).then(inlined => {
+      if (!cancelled) setInlinedEditorContent(inlined);
+    });
+    return () => { cancelled = true; };
+  }, [editorFrameContent, useChinaCDN]);
 
   const createPresentDocument = (html: string): string | null => {
     const docKey = `openslides_present_${Date.now()}_${Math.random().toString(36).slice(2)}`;
@@ -1198,7 +1280,8 @@ export default function SlidePreview({
 
   const handlePresent = () => {
     const content = normalizedContent;
-    const html = makeImageUrlsAbsolute(buildPresentationHtml(content));
+    let html = makeImageUrlsAbsolute(buildPresentationHtml(content));
+    if (useChinaCDN) html = applyChinaCDN(html);
     const docKey = createPresentDocument(html);
     if (!docKey) {
       window.alert('Unable to prepare presentation HTML for presenting.');
@@ -1218,6 +1301,7 @@ export default function SlidePreview({
     const content = normalizedContent;
     // Make URLs absolute, inline images as base64, inline external CSS/JS for fully standalone file
     let html = makeImageUrlsAbsolute(buildPresentationHtml(content));
+    if (useChinaCDN) html = applyChinaCDN(html);
     html = await inlineImages(html);
     html = await inlineExternalResources(html);
 
@@ -1557,7 +1641,7 @@ export default function SlidePreview({
               <iframe
                 ref={editorFrameRef}
                 title="Slide Editor"
-                srcDoc={injectInlineEditor(editorFrameContent, inlineEditorLabels)}
+                srcDoc={injectInlineEditor(inlinedEditorContent, inlineEditorLabels)}
                 onLoad={() => { postArrowColorToEditor(arrowColor); postTransitionToEditor(sectionTransition); }}
                 style={{
                   border: 0,

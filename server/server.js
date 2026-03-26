@@ -382,7 +382,20 @@ function loadSettings() {
   return {
     activeProvider: SUPPORTED_PROVIDERS.has(settings.activeProvider) ? settings.activeProvider : 'gemini',
     providers: settings.providers || {},
+    tavilyApiKey: settings.tavilyApiKey || '',
   };
+}
+
+function getDefaultModel(provider) {
+  const defaults = {
+    gemini: 'gemini-3.1-pro-preview',
+    claude: 'claude-sonnet-4.6',
+    openai: 'gpt-5.4',
+    kimi: 'kimi-k2.5',
+    zhipu: 'GLM-5',
+    qwen: 'qwen3.5-plus',
+  };
+  return defaults[provider] || 'gpt-5.4';
 }
 
 function getProviderConfig(settings, provider) {
@@ -467,7 +480,7 @@ app.post('/api/generate', async (req, res) => {
   const providerCfg = getProviderConfig(settings, provider);
   const model = typeof req.body.model === 'string' && req.body.model.trim()
     ? req.body.model.trim()
-    : providerCfg.model;
+    : (providerCfg.model || getDefaultModel(provider));
   const projectId = typeof req.body.projectId === 'string' && isSafeProjectId(req.body.projectId)
     ? req.body.projectId
     : 'default-project';
@@ -477,11 +490,22 @@ app.post('/api/generate', async (req, res) => {
   const temperature = Number.isFinite(Number(req.body.temperature)) ? Number(req.body.temperature) : 0.7;
   const files = loadProjectFilesForAI(projectId);
 
+  const msgSummary = messages.map(m => `${m.role}(${(m.content || '').length} chars)`).join(', ');
+  console.log(`\n\x1b[36m━━━ [Generation Agent] ━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m`);
+  console.log(`  Provider:    ${provider}`);
+  console.log(`  Model:       ${model}`);
+  console.log(`  Project:     ${projectId}`);
+  console.log(`  Temperature: ${temperature}`);
+  console.log(`  Messages:    ${messages.length} [${msgSummary}]`);
+  console.log(`  Files:       ${files.length} project file(s)`);
+
   if (!SUPPORTED_PROVIDERS.has(provider)) {
+    console.log(`  \x1b[31m✗ Unsupported provider\x1b[0m`);
     return res.status(400).json({ error: 'Unsupported provider' });
   }
 
   if (!apiKey) {
+    console.log(`  \x1b[31m✗ No API key for ${provider}\x1b[0m`);
     return res.status(400).json({ error: `No API key configured for ${provider}. Please set it in Settings.` });
   }
 
@@ -492,6 +516,7 @@ app.post('/api/generate', async (req, res) => {
     return res.status(error.status || 400).json({ error: error.message || 'Invalid base URL' });
   }
 
+  const startTime = Date.now();
   try {
     let result;
     if (provider === 'claude') {
@@ -503,9 +528,15 @@ app.post('/api/generate', async (req, res) => {
     } else {
       result = await callOpenAICompatible(base, apiKey, model, system, messages, temperature, files, provider);
     }
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    const usage = result.usage || {};
+    console.log(`  \x1b[32m✓ Generated in ${elapsed}s\x1b[0m`);
+    console.log(`  Tokens:      input=${usage.inputTokens || 0} cached=${usage.cachedTokens || 0} output=${usage.outputTokens || 0}`);
+    console.log(`  Response:    ${(result.text || '').length} chars`);
     res.json(result);
   } catch (error) {
-    console.error('AI generation error:', error);
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.error(`  \x1b[31m✗ Failed after ${elapsed}s: ${error.message}\x1b[0m`);
     res.status(500).json({ error: error.message || 'AI generation failed' });
   }
 });
@@ -1605,6 +1636,299 @@ app.get('/api/projects/:id/file/:filename', (req, res) => {
 });
 
 // ============================================================
+// Project Context (hidden .context.json for search results, data summaries, etc.)
+// ============================================================
+
+function getProjectContextPath(projectId) {
+  return path.join(getProjectDir(projectId), '.context.json');
+}
+
+app.get('/api/projects/:id/context', (req, res) => {
+  try {
+    requireProject(req.params.id);
+    const ctxPath = getProjectContextPath(req.params.id);
+    const data = readJsonFile(ctxPath, { searchResults: [], dataSummaries: [] });
+    const searchCount = (data.searchResults || []).length;
+    const dataCount = (data.dataSummaries || []).length;
+    if (searchCount > 0 || dataCount > 0) {
+      console.log(`\n\x1b[90m━━━ [Context Load] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m`);
+      console.log(`  Project:     ${req.params.id}`);
+      console.log(`  Search:      ${searchCount} cached result(s)`);
+      console.log(`  Data:        ${dataCount} summary(ies)`);
+    }
+    res.json(data);
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Failed to load context' });
+  }
+});
+
+app.put('/api/projects/:id/context', (req, res) => {
+  try {
+    requireProject(req.params.id);
+    ensureProjectDir(req.params.id);
+    const ctxPath = getProjectContextPath(req.params.id);
+    const existing = readJsonFile(ctxPath, { searchResults: [], dataSummaries: [] });
+
+    const newSearchCount = Array.isArray(req.body?.searchResults) ? req.body.searchResults.length : 0;
+    const newDataCount = Array.isArray(req.body?.dataSummaries) ? req.body.dataSummaries.length : 0;
+
+    // Merge: append new search results (deduplicate by URL), append data summaries
+    let addedSearch = 0;
+    if (Array.isArray(req.body?.searchResults)) {
+      const existingUrls = new Set((existing.searchResults || []).map(r => r.url));
+      for (const r of req.body.searchResults) {
+        if (r.url && !existingUrls.has(r.url)) {
+          existing.searchResults.push(r);
+          existingUrls.add(r.url);
+          addedSearch++;
+        }
+      }
+    }
+    if (Array.isArray(req.body?.dataSummaries)) {
+      existing.dataSummaries = [...(existing.dataSummaries || []), ...req.body.dataSummaries];
+    }
+
+    writeJsonFile(ctxPath, existing);
+
+    console.log(`\n\x1b[90m━━━ [Context Save] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m`);
+    console.log(`  Project:     ${req.params.id}`);
+    console.log(`  Added:       ${addedSearch} search result(s), ${newDataCount} data summary(ies)`);
+    console.log(`  Total:       ${existing.searchResults.length} search, ${existing.dataSummaries.length} data`);
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Failed to save context' });
+  }
+});
+
+// ============================================================
+// Search Agent (Tavily)
+// ============================================================
+
+app.post('/api/search', async (req, res) => {
+  const settings = loadSettings();
+  const tavilyApiKey = settings.tavilyApiKey || '';
+
+  console.log(`\n\x1b[33m━━━ [Search Agent] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m`);
+
+  if (!tavilyApiKey) {
+    console.log(`  \x1b[31m✗ No Tavily API key configured — skipping\x1b[0m`);
+    return res.json({ results: [], error: 'No Tavily API key configured' });
+  }
+
+  const queries = Array.isArray(req.body.queries) ? req.body.queries.slice(0, 3) : [];
+  if (queries.length === 0) {
+    console.log(`  \x1b[31m✗ No queries provided\x1b[0m`);
+    return res.json({ results: [] });
+  }
+
+  console.log(`  Queries:     ${queries.length}`);
+  queries.forEach((q, i) => console.log(`    ${i + 1}. "${q}"`));
+
+  const startTime = Date.now();
+  try {
+    const allResults = [];
+    const seenUrls = new Set();
+    let answer = '';
+
+    for (const query of queries) {
+      const qStart = Date.now();
+      const resp = await fetch('https://api.tavily.com/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          api_key: tavilyApiKey,
+          query: String(query),
+          search_depth: 'advanced',
+          include_answer: true,
+          max_results: 5,
+        }),
+      });
+
+      if (!resp.ok) {
+        console.log(`    \x1b[31m✗ "${query}" failed (${resp.status}) in ${((Date.now() - qStart) / 1000).toFixed(1)}s\x1b[0m`);
+        continue;
+      }
+
+      const data = await resp.json();
+      const qElapsed = ((Date.now() - qStart) / 1000).toFixed(1);
+      const newResults = (data.results || []).filter(r => !seenUrls.has(r.url));
+      console.log(`    \x1b[32m✓\x1b[0m "${query}" → ${newResults.length} new results in ${qElapsed}s`);
+
+      if (data.answer && !answer) answer = data.answer;
+
+      for (const r of data.results || []) {
+        if (!seenUrls.has(r.url)) {
+          seenUrls.add(r.url);
+          allResults.push({
+            title: r.title || '',
+            url: r.url || '',
+            content: r.content || '',
+            score: r.score || 0,
+          });
+        }
+      }
+    }
+
+    // Sort by relevance score and keep top 10
+    allResults.sort((a, b) => b.score - a.score);
+    const finalResults = allResults.slice(0, 10);
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+
+    console.log(`  \x1b[32m✓ Search complete in ${elapsed}s — ${finalResults.length} results\x1b[0m`);
+    if (answer) console.log(`  Answer:      "${answer.slice(0, 120)}${answer.length > 120 ? '...' : ''}"`);
+    finalResults.forEach((r, i) => console.log(`    ${i + 1}. [${r.score.toFixed(2)}] ${r.title}`));
+
+    res.json({ results: finalResults, answer });
+  } catch (error) {
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.error(`  \x1b[31m✗ Search failed after ${elapsed}s: ${error.message}\x1b[0m`);
+    res.json({ results: [], error: error.message || 'Search failed' });
+  }
+});
+
+// ============================================================
+// Planner Agent (decides if search is needed)
+// ============================================================
+
+const PLANNER_SYSTEM_PROMPT = `You are a planning assistant. Given a user's request to generate or edit a presentation, decide two things:
+1. Whether web search is needed to gather new information
+2. Whether existing project context (previous research, data summaries) should be included
+
+Return JSON only, no other text:
+{
+  "needsSearch": true/false,
+  "needsContext": true/false,
+  "queries": ["query1", "query2"],
+  "reasoning": "brief explanation"
+}
+
+needsSearch = true when the prompt requires:
+- Current facts, statistics, prices, or data the LLM may not know
+- Recent events, news, product launches, or trends
+- Specific company/product/person/project information that needs accuracy
+- Technical details that benefit from authoritative sources
+- Any topic you are not confident you have accurate knowledge about
+
+needsSearch = false when:
+- The prompt is about generic/evergreen topics (e.g., "make a presentation about teamwork")
+- The user is editing/modifying existing slides visually (e.g., "change the color", "fix the layout", "make the title bigger")
+- The user provides all the content themselves via uploaded files
+- The topic is well-known and unlikely to have changed recently
+
+needsContext = true when:
+- The user is adding new content slides that relate to previously researched topics
+- The user asks to expand, elaborate, or add details on a topic that was previously searched
+- The generation would benefit from the factual accuracy provided by prior research
+
+needsContext = false when:
+- The user's request is purely visual (styling, layout, colors, font sizes, animations)
+- The user is doing simple text edits that don't need factual backing
+- There is no existing context available
+
+The user message may include "[Existing project context topics: ...]" listing topics already researched. Do NOT search for topics already covered unless the user explicitly asks for updated information. Only search for NEW topics not yet in the context.
+
+Generate 1-3 simple, direct search queries. When the topic is unfamiliar or unknown to you, use straightforward queries like "What is [topic]?" or "[topic] introduction" — do NOT infer, guess, or expand the topic into something else. Never add year numbers, assumed project names, or speculative details to queries. Keep queries short and factual.`;
+
+app.post('/api/plan', async (req, res) => {
+  const settings = loadSettings();
+
+  console.log(`\n\x1b[35m━━━ [Planner Agent] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m`);
+
+  // If no Tavily key, skip planning entirely
+  if (!settings.tavilyApiKey) {
+    console.log(`  \x1b[33m⊘ No Tavily API key — skipping planning\x1b[0m`);
+    return res.json({ needsSearch: false, needsContext: false, queries: [], reasoning: 'No Tavily API key configured' });
+  }
+
+  const userPrompt = typeof req.body.prompt === 'string' ? req.body.prompt : '';
+  if (!userPrompt.trim()) {
+    console.log(`  \x1b[33m⊘ Empty prompt — skipping\x1b[0m`);
+    return res.json({ needsSearch: false, needsContext: false, queries: [], reasoning: 'Empty prompt' });
+  }
+
+  // Show prompt (truncated) and whether it has existing context info
+  const hasExistingContext = userPrompt.includes('[Existing project context topics:');
+  const promptPreview = userPrompt.replace(/\n\n\[Existing project context topics:[\s\S]*$/, '').slice(0, 150);
+  console.log(`  Prompt:      "${promptPreview}${promptPreview.length >= 150 ? '...' : ''}"`);
+  console.log(`  Has context: ${hasExistingContext ? 'yes' : 'no'}`);
+
+  const provider = typeof req.body.provider === 'string' && SUPPORTED_PROVIDERS.has(req.body.provider)
+    ? req.body.provider
+    : settings.activeProvider;
+  const providerCfg = getProviderConfig(settings, provider);
+  const apiKey = providerCfg.apiKey;
+
+  if (!apiKey) {
+    console.log(`  \x1b[31m✗ No API key for ${provider}\x1b[0m`);
+    return res.json({ needsSearch: false, needsContext: false, queries: [], reasoning: 'No LLM API key for planning' });
+  }
+
+  let base;
+  try {
+    base = sanitizeBaseUrl(providerCfg.baseUrl || '', provider);
+  } catch {
+    return res.json({ needsSearch: false, needsContext: false, queries: [], reasoning: 'Invalid base URL' });
+  }
+
+  const model = (typeof req.body.model === 'string' && req.body.model.trim())
+    ? req.body.model.trim()
+    : (providerCfg.model || getDefaultModel(provider));
+  console.log(`  Provider:    ${provider} (${model})`);
+
+  const messages = [{ role: 'user', content: userPrompt }];
+  const startTime = Date.now();
+
+  try {
+    let result;
+    if (provider === 'claude') {
+      result = await callClaude(base, apiKey, model, PLANNER_SYSTEM_PROMPT, messages, 0.1, []);
+    } else if (provider === 'gemini') {
+      result = await callGemini(base, apiKey, model, 'planner', PLANNER_SYSTEM_PROMPT, messages, 0.1, []);
+    } else if (provider === 'openai' && isNativeOpenAIBaseUrl(base)) {
+      result = await callOpenAINative(base, apiKey, model, 'planner', PLANNER_SYSTEM_PROMPT, messages, 0.1, []);
+    } else {
+      result = await callOpenAICompatible(base, apiKey, model, PLANNER_SYSTEM_PROMPT, messages, 0.1, [], provider);
+    }
+
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+
+    // Parse JSON from the LLM response
+    const text = result.text || '';
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0]);
+      const plan = {
+        needsSearch: !!parsed.needsSearch,
+        needsContext: parsed.needsContext !== false,
+        queries: Array.isArray(parsed.queries) ? parsed.queries.map(String).slice(0, 3) : [],
+        reasoning: String(parsed.reasoning || ''),
+      };
+
+      console.log(`  \x1b[32m✓ Planned in ${elapsed}s\x1b[0m`);
+      console.log(`  Decision:`);
+      console.log(`    needsSearch:  ${plan.needsSearch ? '\x1b[33myes\x1b[0m' : '\x1b[90mno\x1b[0m'}`);
+      console.log(`    needsContext: ${plan.needsContext ? '\x1b[33myes\x1b[0m' : '\x1b[90mno\x1b[0m'}`);
+      if (plan.queries.length > 0) {
+        console.log(`    queries:`);
+        plan.queries.forEach((q, i) => console.log(`      ${i + 1}. "${q}"`));
+      }
+      console.log(`    reasoning:    "${plan.reasoning}"`);
+
+      res.json(plan);
+    } else {
+      console.log(`  \x1b[31m✗ Could not parse planner response (${elapsed}s)\x1b[0m`);
+      console.log(`  Raw response:  "${text.slice(0, 200)}"`);
+      res.json({ needsSearch: false, needsContext: true, queries: [], reasoning: 'Could not parse planner response' });
+    }
+  } catch (error) {
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.error(`  \x1b[31m✗ Planner failed after ${elapsed}s: ${error.message}\x1b[0m`);
+    res.json({ needsSearch: false, queries: [], reasoning: error.message || 'Planning failed' });
+  }
+});
+
+// ============================================================
 // Settings (persisted to settings.json)
 // ============================================================
 
@@ -1623,6 +1947,7 @@ app.get('/api/settings', (req, res) => {
   res.json({
     activeProvider: settings.activeProvider,
     providers: configuredProviders,
+    tavilyApiKey: settings.tavilyApiKey || '',
   });
 });
 
@@ -1648,7 +1973,12 @@ app.put('/api/settings', (req, res) => {
       baseUrl: typeof req.body?.baseUrl === 'string' ? req.body.baseUrl.trim() : (existingCfg.baseUrl || ''),
     };
 
-    const nextSettings = { activeProvider, providers };
+    // Handle Tavily API key (stored at root level, not under providers)
+    const tavilyApiKey = typeof req.body?.tavilyApiKey === 'string'
+      ? req.body.tavilyApiKey.trim()
+      : (existing.tavilyApiKey || '');
+
+    const nextSettings = { activeProvider, providers, tavilyApiKey };
     writeJsonFile(SETTINGS_PATH, nextSettings);
     res.json({ success: true });
   } catch (error) {

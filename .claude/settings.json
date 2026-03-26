@@ -46,7 +46,16 @@
       "Bash(node -e \"import { Agent, request } from ''undici''; console.log\\(''undici import OK, Agent:'', typeof Agent, ''request:'', typeof request\\)\")",
       "Bash(python3 /Users/yuxiang/Research/fun/OpenSlides/scripts/http_request.py)",
       "Bash(node -e \"import\\(''''./server/server.js''''\\)\")",
-      "Bash(node --check server/server.js)"
+      "Bash(node --check server/server.js)",
+      "Bash(find /Users/yuxiang/Research/fun/OpenSlides -type f -name *.ts -path */api/* -o -path */server/* -o -path */backend/*)",
+      "Bash(node --check /Users/yuxiang/Research/fun/OpenSlides/server/server.js)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3001/api/plan -X POST -H \"Content-Type: application/json\" -d '{\"\"prompt\"\":\"\"test\"\",\"\"provider\"\":\"\"kimi\"\"}')",
+      "Bash(curl -s http://localhost:3001/api/plan -X POST -H \"Content-Type: application/json\" -d '{\"\"prompt\"\":\"\"test\"\",\"\"provider\"\":\"\"kimi\"\"}')",
+      "Bash(node -e \":*)",
+      "Bash(curl -s http://localhost:3001/api/settings)",
+      "Bash(curl -sv http://localhost:3001/api/settings)",
+      "Bash(kill 15816)",
+      "Bash(kill 16404)"
     ]
   }
 }

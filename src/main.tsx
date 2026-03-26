@@ -4,6 +4,7 @@ import App from "./App";
 import "./index.css";
 
 import LanguageProvider from "./contexts/LanguageContext";
+import CDNProvider from "./contexts/CDNContext";
 
 // Handle /present route before React mounts to avoid StrictMode/HMR issues
 if (window.location.pathname === "/present") {
@@ -22,7 +23,9 @@ if (window.location.pathname === "/present") {
   ReactDOM.createRoot(document.getElementById("root")!).render(
     <React.StrictMode>
       <LanguageProvider>
-        <App />
+        <CDNProvider>
+          <App />
+        </CDNProvider>
       </LanguageProvider>
     </React.StrictMode>
   );
