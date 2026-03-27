@@ -7,3 +7,4 @@ projects/*
 !projects/.gitkeep
 config/settings.json
 .DS_Store
+.claude

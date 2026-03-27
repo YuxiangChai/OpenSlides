@@ -57,7 +57,18 @@
       "Bash(kill 15816)",
       "Bash(kill 16404)",
       "Bash(grep -n \"generating\\\\|loading\\\\|overlay\\\\|spinner\" /Users/yuxiang/Research/fun/OpenSlides/src/components/*.tsx -i)",
-      "Bash(grep -n \"z-index\\\\|position.*fixed\\\\|position.*absolute\" /Users/yuxiang/Research/fun/OpenSlides/src/components/*.tsx /Users/yuxiang/Research/fun/OpenSlides/src/App.tsx)"
+      "Bash(grep -n \"z-index\\\\|position.*fixed\\\\|position.*absolute\" /Users/yuxiang/Research/fun/OpenSlides/src/components/*.tsx /Users/yuxiang/Research/fun/OpenSlides/src/App.tsx)",
+      "Bash(npm view:*)",
+      "Bash(npm search:*)",
+      "Bash(curl -s https://raw.githubusercontent.com/mehmet-kozan/pdf-parse/master/README.md)",
+      "Bash(curl -s https://registry.npmjs.org/pdf-parse)",
+      "Bash(curl -s \"https://api.github.com/repos/mehmet-kozan/pdf-parse\")",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(f''''Stars: {d.get\\(\"\"stargazers_count\"\"\\)}\\\\nForks: {d.get\\(\"\"forks_count\"\"\\)}\\\\nOpen Issues: {d.get\\(\"\"open_issues_count\"\"\\)}\\\\nPushed At: {d.get\\(\"\"pushed_at\"\"\\)}\\\\nCreated: {d.get\\(\"\"created_at\"\"\\)}\\\\nArchived: {d.get\\(\"\"archived\"\"\\)}\\\\nLicense: {d.get\\(\"\"license\"\",{}\\).get\\(\"\"name\"\"\\)}''''\\)\")",
+      "Bash(curl -s \"https://api.github.com/repos/mehmet-kozan/pdf-parse/commits?per_page=5\")",
+      "Bash(python3 -c \":*)",
+      "Bash(npm install:*)",
+      "Bash(node -e \"import\\(''pdf-parse''\\).then\\(m => console.log\\(Object.keys\\(m.default || m\\)\\)\\)\")",
+      "Bash(ls /Users/yuxiang/Research/fun/OpenSlides/projects/*/assets/*.pdf)"
     ]
   }
 }

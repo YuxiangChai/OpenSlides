@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { PDFParse } from 'pdf-parse';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -472,6 +473,61 @@ function isNativeOpenAIBaseUrl(baseUrl) {
   }
 }
 
+function needsPdfParsing(provider, baseUrl) {
+  if (provider === 'claude' || provider === 'gemini') return false;
+  if (provider === 'openai' && isNativeOpenAIBaseUrl(baseUrl)) return false;
+  return true;
+}
+
+async function parsePdfFiles(files) {
+  const result = [];
+  for (const file of files) {
+    if (file.mimeType === 'application/pdf') {
+      try {
+        const base64Data = file.dataUrl.replace(/^data:[^;]+;base64,/, '');
+        const buffer = Buffer.from(base64Data, 'base64');
+        const parser = new PDFParse({ data: buffer });
+
+        const textResult = await parser.getText();
+        const fullText = textResult.text || textResult.pages?.map(p => p.text).join('\n\n') || '';
+
+        // Add extracted text as a synthetic text file
+        result.push({
+          name: file.name,
+          mimeType: 'text/plain',
+          size: fullText.length,
+          dataUrl: `data:text/plain;base64,${Buffer.from(fullText).toString('base64')}`,
+          _parsedText: fullText,
+        });
+
+        // Extract images
+        const imgResult = await parser.getImage();
+        for (const page of imgResult.pages || []) {
+          for (const img of page.images || []) {
+            if (img.dataUrl) {
+              result.push({
+                name: `${file.name}_${img.name || 'img'}.png`,
+                mimeType: 'image/png',
+                size: img.data?.length || 0,
+                dataUrl: img.dataUrl,
+              });
+            }
+          }
+        }
+
+        console.log(`  [pdf-parse] ${file.name}: ${textResult.total} pages, ${fullText.length} chars, ${imgResult.pages?.reduce((n, p) => n + (p.images?.length || 0), 0) || 0} images`);
+        parser.destroy();
+      } catch (err) {
+        console.warn(`  [pdf-parse] Failed to parse ${file.name}: ${err.message}`);
+        // Skip the PDF if parsing fails
+      }
+    } else {
+      result.push(file);
+    }
+  }
+  return result;
+}
+
 app.post('/api/generate', async (req, res) => {
   const settings = loadSettings();
   const provider = typeof req.body.provider === 'string' && SUPPORTED_PROVIDERS.has(req.body.provider)
@@ -516,6 +572,14 @@ app.post('/api/generate', async (req, res) => {
     return res.status(error.status || 400).json({ error: error.message || 'Invalid base URL' });
   }
 
+  // Parse PDFs for non-native providers that don't support direct PDF upload
+  let processedFiles = files;
+  if (needsPdfParsing(provider, base) && files.some(f => f.mimeType === 'application/pdf')) {
+    console.log(`  [pdf-parse] Parsing PDFs for non-native provider ${provider}...`);
+    processedFiles = await parsePdfFiles(files);
+    console.log(`  [pdf-parse] ${files.length} files → ${processedFiles.length} files after parsing`);
+  }
+
   const startTime = Date.now();
   try {
     let result;
@@ -526,7 +590,7 @@ app.post('/api/generate', async (req, res) => {
     } else if (provider === 'openai' && isNativeOpenAIBaseUrl(base)) {
       result = await callOpenAINative(base, apiKey, model, projectId, system, messages, temperature, files);
     } else {
-      result = await callOpenAICompatible(base, apiKey, model, system, messages, temperature, files, provider);
+      result = await callOpenAICompatible(base, apiKey, model, system, messages, temperature, processedFiles, provider);
     }
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     const usage = result.usage || {};
@@ -553,16 +617,51 @@ async function callClaude(baseUrl, apiKey, model, systemText, messages, temperat
     });
   }
 
+  // Build project-level file content blocks to inject into the first user message
+  const projectFileBlocks = [];
+  if (Array.isArray(files) && files.length > 0) {
+    for (const f of files) {
+      const base64Data = (f.dataUrl || '').includes(',') ? f.dataUrl.split(',')[1] : '';
+      if (!base64Data) continue;
+
+      if (f.mimeType.startsWith('image/')) {
+        projectFileBlocks.push({
+          type: 'image',
+          source: { type: 'base64', media_type: f.mimeType, data: base64Data },
+        });
+      } else if (f.mimeType === 'application/pdf') {
+        projectFileBlocks.push({
+          type: 'document',
+          source: { type: 'base64', media_type: 'application/pdf', data: base64Data },
+        });
+      } else if (f.mimeType.startsWith('text/') || f.mimeType === 'application/json' || f.mimeType === 'application/xml') {
+        const text = Buffer.from(base64Data, 'base64').toString('utf-8');
+        projectFileBlocks.push({
+          type: 'text',
+          text: `[Content from ${f.name || 'file'}]\n${text}`,
+        });
+      }
+    }
+  }
+  let projectFilesInjected = false;
+
   // Convert messages to Claude format
   const claudeMessages = [];
-  let hasFiles = false;
+  let hasFiles = projectFileBlocks.length > 0;
 
   for (const msg of messages) {
     if (msg.role === 'system') continue;
 
     const content = [];
+    const role = msg.role === 'model' ? 'assistant' : msg.role;
 
-    // Handle file attachments (images + PDFs)
+    // Inject project-level files into the first user message
+    if (!projectFilesInjected && role === 'user' && projectFileBlocks.length > 0) {
+      content.push(...projectFileBlocks);
+      projectFilesInjected = true;
+    }
+
+    // Handle inline file attachments (images, PDFs, text files)
     if (msg.files && msg.files.length > 0) {
       hasFiles = true;
       for (const f of msg.files) {
@@ -576,16 +675,19 @@ async function callClaude(baseUrl, apiKey, model, systemText, messages, temperat
             type: 'document',
             source: { type: 'base64', media_type: 'application/pdf', data: f.data },
           });
+        } else if (f.mimeType.startsWith('text/') || f.mimeType === 'application/json' || f.mimeType === 'application/xml') {
+          const text = Buffer.from(f.data, 'base64').toString('utf-8');
+          content.push({
+            type: 'text',
+            text: `[Content from ${f.name || 'file'}]\n${text}`,
+          });
         }
       }
     }
 
     content.push({ type: 'text', text: msg.content });
 
-    claudeMessages.push({
-      role: msg.role === 'model' ? 'assistant' : msg.role,
-      content,
-    });
+    claudeMessages.push({ role, content });
   }
 
   // Place cache_control on the last stable block:
@@ -1005,6 +1107,9 @@ async function callGemini(baseUrl, apiKey, model, projectId, systemText, message
           parts.push({
             inline_data: { mime_type: f.mimeType, data: f.data },
           });
+        } else if (f.mimeType.startsWith('text/') || f.mimeType === 'application/json' || f.mimeType === 'application/xml') {
+          const text = Buffer.from(f.data, 'base64').toString('utf-8');
+          parts.push({ text: `[Content from ${f.name || 'file'}]\n${text}` });
         }
       }
     }
@@ -1246,10 +1351,34 @@ async function callOpenAINative(baseUrl, apiKey, model, projectId, systemText, m
 
   for (const msg of stripSyntheticFilePrelude(messages)) {
     if (msg.role === 'system') continue;
-    oaiMessages.push({
-      role: msg.role === 'model' ? 'assistant' : msg.role,
-      content: msg.content,
-    });
+    const role = msg.role === 'model' ? 'assistant' : msg.role;
+
+    if (msg.files && msg.files.length > 0) {
+      const content = [];
+      for (const f of msg.files) {
+        if (f.mimeType.startsWith('image/')) {
+          content.push({
+            type: 'image_url',
+            image_url: { url: `data:${f.mimeType};base64,${f.data}` },
+          });
+        } else if (f.mimeType.startsWith('text/') || f.mimeType === 'application/json' || f.mimeType === 'application/xml') {
+          const text = Buffer.from(f.data, 'base64').toString('utf-8');
+          content.push({ type: 'text', text: `[Content from ${f.name || 'file'}]\n${text}` });
+        } else {
+          content.push({
+            type: 'file',
+            file: {
+              filename: f.name || 'upload',
+              file_data: `data:${f.mimeType};base64,${f.data}`,
+            },
+          });
+        }
+      }
+      content.push({ type: 'text', text: msg.content });
+      oaiMessages.push({ role, content });
+    } else {
+      oaiMessages.push({ role, content: msg.content });
+    }
   }
 
   const body = {
@@ -1299,6 +1428,34 @@ async function callOpenAICompatible(baseUrl, apiKey, model, systemText, messages
     oaiMessages.push({ role: 'system', content: systemText });
   }
 
+  // Prepare project-level file content to inject into the first user message
+  const projectFileContent = [];
+  if (Array.isArray(files) && files.length > 0) {
+    for (const f of files) {
+      if (f.mimeType.startsWith('image/')) {
+        projectFileContent.push({
+          type: 'image_url',
+          image_url: { url: f.dataUrl },
+        });
+      } else if (f._parsedText) {
+        // Parsed PDF text — inject as text block
+        projectFileContent.push({
+          type: 'text',
+          text: `[Parsed content from ${f.name}]\n${f._parsedText}`,
+        });
+      } else if (f.mimeType.startsWith('text/') || f.mimeType === 'application/json' || f.mimeType === 'application/xml') {
+        // Plain text files — decode base64 and inject as text
+        const base64 = f.dataUrl.replace(/^data:[^;]+;base64,/, '');
+        const text = Buffer.from(base64, 'base64').toString('utf-8');
+        projectFileContent.push({
+          type: 'text',
+          text: `[Content from ${f.name}]\n${text}`,
+        });
+      }
+    }
+  }
+  let projectFilesInjected = false;
+
   for (const msg of messages) {
     if (msg.role === 'system') continue;
 
@@ -1307,16 +1464,52 @@ async function callOpenAICompatible(baseUrl, apiKey, model, systemText, messages
     // Handle file attachments (images as vision content)
     if (msg.files && msg.files.length > 0) {
       const content = [];
+      // Inject project files into the first user message
+      if (!projectFilesInjected && role === 'user' && projectFileContent.length > 0) {
+        content.push(...projectFileContent);
+        projectFilesInjected = true;
+      }
       for (const f of msg.files) {
         if (f.mimeType.startsWith('image/')) {
           content.push({
             type: 'image_url',
             image_url: { url: `data:${f.mimeType};base64,${f.data}` },
           });
+        } else if (f.mimeType === 'application/pdf') {
+          // Parse inline PDF to text + images for compatible providers
+          try {
+            const buffer = Buffer.from(f.data, 'base64');
+            const parser = new PDFParse({ data: buffer });
+            const textResult = await parser.getText();
+            const fullText = textResult.text || textResult.pages?.map(p => p.text).join('\n\n') || '';
+            if (fullText) {
+              content.push({ type: 'text', text: `[Parsed content from ${f.name || 'file'}]\n${fullText}` });
+            }
+            const imgResult = await parser.getImage();
+            for (const page of imgResult.pages || []) {
+              for (const img of page.images || []) {
+                if (img.dataUrl) {
+                  content.push({ type: 'image_url', image_url: { url: img.dataUrl } });
+                }
+              }
+            }
+            parser.destroy();
+          } catch (err) {
+            console.warn(`[openai-compat] Failed to parse inline PDF ${f.name}: ${err.message}`);
+          }
+        } else if (f.mimeType.startsWith('text/') || f.mimeType === 'application/json' || f.mimeType === 'application/xml') {
+          const text = Buffer.from(f.data, 'base64').toString('utf-8');
+          content.push({ type: 'text', text: `[Content from ${f.name || 'file'}]\n${text}` });
         }
       }
       content.push({ type: 'text', text: msg.content });
       oaiMessages.push({ role, content });
+    } else if (!projectFilesInjected && role === 'user' && projectFileContent.length > 0) {
+      // Inject project files into this first user message
+      const content = [...projectFileContent];
+      content.push({ type: 'text', text: msg.content });
+      oaiMessages.push({ role, content });
+      projectFilesInjected = true;
     } else {
       oaiMessages.push({ role, content: msg.content });
     }
